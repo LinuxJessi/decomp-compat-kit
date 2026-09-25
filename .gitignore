@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+# Never commit game-derived material: originals, extracted assets, decompiled code
+*.iso
+*.ISO
+*.OVL
+*.IRX
+SLUS_*
+*.class
+*.arx
+*.xtx
+report.json
