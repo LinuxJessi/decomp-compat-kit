@@ -1,4 +1,4 @@
-# Decomp Compatibility Kit
+# Xenosaga I Decomp Compatibility Kit
 
 Tools for checking a matching decompilation against the original binary with an
 **independently obtained toolchain**, and for moving symbol tables between decomp
