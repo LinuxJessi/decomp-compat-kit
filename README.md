@@ -1,4 +1,4 @@
-# Decomp Compatibility Kit
+# PS2-Decomp Compatibility Kit
 
 [![Featured by Awesome REA](https://raw.githubusercontent.com/reacher-z/Awesome-REA/477658fa73f6860e86cd1fc526657c2efdc25194/assets/featured-by-awesome-rea-inline.svg)](https://awesomerea.org/resources/decomp-compat-kit/)
 
@@ -8,18 +8,45 @@ binaries and projects, triaging functions, checking a decomp's C against the
 original bytes with an **independently obtained toolchain**, and running the
 one-function matching loop in a way that cannot be talked into a false match.
 
-It grew out of the *Xenosaga Episode I* decompilation (NTSC-U, `SLUS_204.69`),
-where it was the "Xenosaga I Decomp Compatibility Kit", and the matching tools
-still default to that target. Since 2026-10-30 the identification, symbol and
-triage tools are measured on six games (`docs/CORPUS.md`), the verifier takes
-any ELF layout and any compile-contract layout, and two documents record what
-the Xenosaga I project learned about the stock ee-gcc 2.96 versus the retail
-toolchain (`docs/TOOLCHAIN-DIFFERENCES.md`) and about matching GCC 2.96 output
-on the Emotion Engine (`docs/MATCHING-PLAYBOOK.md`).
-
 No game binaries, extracted assets, or decompiled game code are distributed
 here. You need your own copy of the game. Everything is Python 3.9+, standard
 library only (`rabbitizer` is optional, for named disassembly in `match_kit.py`).
+
+## History
+
+The kit started in September 2026 as the *Xenosaga I Decomp Compatibility Kit*:
+two scripts written to check a second project's matching decompilation of
+`SLUS_204.69` from the outside. One compiled its C with a stock, unpatched
+ee-gcc 2.96 and compared every function against the retail bytes; the other
+exported the game's unstripped symbol table in the format splat reads. The
+first run settled the compiler question for that game (817 of 857 functions
+identical, every difference a documented toolchain patch) and the two projects
+have exchanged symbols, verification and tooling since.
+
+Working alongside that decomp taught more than the verifier could hold. Its
+toolchain investigations found, one byte patch at a time, how the archived
+compiler and assembler differ from whatever built the retail game; running
+language models against its gate showed what a matching loop has to refuse
+before a byte match means anything; and the per-function matching tool that
+grew out of that became part of the kit.
+
+In the same months the workspace fingerprinted the executables of other
+PlayStation 2 games on the shelf: Xenosaga III, Final Fantasy X, Metal Gear
+Solid 3, Silent Hill 2 and Yakuza. The heuristics that had been "obviously
+right" on Xenosaga broke on each of them in a different way: a compiler that
+saves registers like SN ProDG but is Metrowerks CodeWarrior, a boot executable
+that is only a decompressor stub, a game whose entire code is a CodeWarrior
+overlay behind a tiny loader, a 2001 title built with the 1999 compiler. The
+methods survived; the defaults did not.
+
+So on 2026-10-30 the kit was renamed and regrouped around the whole pipeline a
+new PS2 decomp walks before its first matched function: **identify** the
+compiler, **name** what the SDK already named, **triage** the rest, **probe**
+the toolchain you hold, **verify** from the outside, **match** one function at
+a time, with the lessons written down in `docs/`. Xenosaga I remains the
+reference target, the one where every claim is proven by a byte-identical
+compile; the six-game table in `docs/CORPUS.md` says which other rows are
+measured and which are proven.
 
 ## Why
 
