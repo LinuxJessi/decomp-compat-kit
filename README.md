@@ -1,5 +1,7 @@
 # Xenosaga I Decomp Compatibility Kit
 
+[![Featured by Awesome REA](https://raw.githubusercontent.com/reacher-z/Awesome-REA/477658fa73f6860e86cd1fc526657c2efdc25194/assets/featured-by-awesome-rea-inline.svg)](https://awesomerea.org/resources/decomp-compat-kit/)
+
 Tools for checking a matching decompilation against the original binary with an
 **independently obtained toolchain**, and for moving symbol tables between decomp
 projects.
