@@ -1,0 +1,85 @@
+{
+ "schema": "rootfs-lock/1",
+ "doc": "Measured identities of the two toolchains verify_decomp.py can drive: `stock` under EE_ROOTFS (the independent, unpatched ee-gcc 2.96) and `contract` under <upstream>/.work/toolchains (the decomp's pinned cc1 + la29 ee-as). tools/doctor.py compares these hashes with the files on disk (the stock section; the contract section records the fsv3 pair measured here, the upstream has since moved to an fsv8 cc1, which verify_decomp.py now reads from the upstream's config/toolchain-identity.json). `root_measured` names the root by its environment variable or default, never a machine path. Regenerate by hand when a payload changes; `pinned_sha256` comes from config/toolchain-identity.json.",
+ "measured": "2026-09-27T18:47:14",
+ "box": {
+  "image": "debian:bookworm-slim",
+  "platform": "linux/386",
+  "libc": "GLIBC 2.36 (Debian 12)",
+  "binfmt": "tonistiigi/binfmt i386"
+ },
+ "stock": {
+  "root_env": "EE_ROOTFS",
+  "root_measured": "$EE_ROOTFS",
+  "tools": {
+   "cc1": {
+    "path": "opt/ee/lib/gcc-lib/ee/2.96-ee-001003-1/cc1",
+    "version": "GNU C 2.96-ee-001003-1 (ee), unpatched",
+    "sha256": "59ec92b3f9f3513e0633331af304733e3094de30884e662a8cb584a51c1c42b5"
+   },
+   "cpp0": {
+    "path": "opt/ee/lib/gcc-lib/ee/2.96-ee-001003-1/cpp0",
+    "sha256": "f6f6b598f39649edfe171d6da8c7f91d07f2b87c2aeeffffbc5f566bfb1a39a9"
+   },
+   "ee-as": {
+    "path": "opt/ee/bin/ee-as",
+    "version": "GNU assembler 2.10-ee-001003-1, unpatched",
+    "sha256": "b8cfdb6ecb6931642914020f92a62e653378f57230eed4895f69afa050d47b5e"
+   },
+   "ld-linux": {
+    "path": "lib/ld-linux.so.2",
+    "glibc": "2.19 (Debian jessie i386)",
+    "sha256": "3329af2dbbaf47fabfd67050bcfd939c6fb74e2c23e0a1183d5f05c58cb80d9c"
+   }
+  }
+ },
+ "contract": {
+  "root_env": "DECOMP_TOOLCHAINS",
+  "root_default": "<upstream>/.work/toolchains",
+  "root_measured": "<upstream>/.work/toolchains",
+  "tools": {
+   "cc1": {
+    "path": "ee-gcc2.96-realconv-lp7-fsv3-v1/bin/cc1",
+    "version": "gcc 2.96-ee-001003-1 (cc1), locally patched: realconv + lp7 + fsv3",
+    "sha256": "790f9f8ca43d2de4cb3621730d287f779f18102f36e2925768d25245b36f5625",
+    "pinned_sha256": "790f9f8ca43d2de4cb3621730d287f779f18102f36e2925768d25245b36f5625",
+    "pin": "exact",
+    "argv": [
+     "<in.i>",
+     "-G<n>",
+     "-quiet",
+     "-O2",
+     "-fno-builtin",
+     "-o",
+     "<out.s>"
+    ],
+    "runs_via": "rootfs ld-linux.so.2 (glibc 2.19 suffices)"
+   },
+   "cpp0": {
+    "path": "ee-gcc2.96-realconv-lp7-fsv3-v1/bin/cpp0",
+    "sha256": "f6f6b598f39649edfe171d6da8c7f91d07f2b87c2aeeffffbc5f566bfb1a39a9",
+    "pinned_sha256": "f6f6b598f39649edfe171d6da8c7f91d07f2b87c2aeeffffbc5f566bfb1a39a9",
+    "note": "byte-identical to the stock cpp0, and unused: the kit preprocesses on the host with clang -E -P -DSKIP_ASM (see README.md, Preprocessing)"
+   },
+   "ee-as": {
+    "path": "ee-legacy-binutils-la29-vsqrt-nolabel-laimm-v1/bin/ee-as",
+    "version": "GNU assembler 2.9-ee-991111, locally patched: memmove + vsqrt + nolabel + laimm",
+    "sha256": "dbe05430985c0af97b494bb5bf683e4ebb2cd1a8e50c9f34a4daf30b61d3f107",
+    "pinned_sha256": "8c55ab9beeb4834c6cc0e841379b81930e329496f85893e8607d5b772c2b51ff",
+    "pin": "rebuilt-from-source (differs from the pin; the TU gate accepts it under XENO_TOOLCHAIN_ALLOW=ee-as-la29-vsqrt)",
+    "argv": [
+     "-EL",
+     "-m5900",
+     "-mabi=eabi",
+     "-G<n>",
+     "-I",
+     ".",
+     "-o",
+     "<out.o>",
+     "<in.s>"
+    ],
+    "runs_via": "the box's own libc (needs GLIBC_2.34; the rootfs glibc 2.19 cannot load it)"
+   }
+  }
+ }
+}

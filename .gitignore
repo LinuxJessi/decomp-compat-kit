@@ -10,3 +10,8 @@ SLUS_*
 *.arx
 *.xtx
 report.json
+.venv/
+# unwrap_image.py outputs and carved overlays
+*.image
+*.unpacked
+*.BIN
