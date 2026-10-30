@@ -164,7 +164,7 @@ class Symbols:
         with open(csv_path) as fh:
             for r in csv.DictReader(fh):
                 if r["binary"] != binary:
-                    if r["name"] and r["type"] in ("FUNC", "OBJECT") and r["bind"] == "GLOBAL":
+                    if r["name"] and r["bind"] == "GLOBAL" and r["type"] in ("FUNC", "OBJECT", "NOTYPE"):
                         self.foreign[r["name"]].add((int(r["va"], 16), int(r["size"])))
                     continue
                 va, size = int(r["va"], 16), int(r["size"])
@@ -173,7 +173,11 @@ class Symbols:
                 base = re.sub(r"\.\d+$", "", r["name"])
                 if base != r["name"]:
                     self.stripped[base].append((va, size))
-        self.gp = self.exact["_gp"][0]
+        # _gp: the binary's own when it defines one; an overlay is linked against the
+        # resident image's, so take the single foreign definition; else 0 (GPREL16
+        # references then stay unresolved rather than being guessed).
+        gp_candidates = {va for va, _size in self.foreign.get("_gp", set())}
+        self.gp = self.exact["_gp"][0] if "_gp" in self.exact else (gp_candidates.pop() if len(gp_candidates) == 1 else 0)
 
     def value(self, name: str) -> int:
         if name in self.exact:

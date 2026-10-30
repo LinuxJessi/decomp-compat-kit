@@ -1,0 +1,2 @@
+mcp>=2,<3
+rabbitizer==1.16.2

@@ -399,6 +399,17 @@ The rules came out of running models against it (`docs/MATCHING-PLAYBOOK.md`
 §1): the tool decides exactness; a worker's "verified manually" is not
 evidence; byte identity is necessary, not sufficient.
 
+## As an MCP server
+
+`mcp/server.py` exposes every stage above to a Model Context Protocol client
+(Claude Code, Claude Desktop, Codex, Cursor) over stdio: `identify_*`,
+`name_*`, `triage_*`, `probe_toolchain_start`, `verify_tu` / `verify_unit_start`,
+and the `match_*` loop with `match_write_function` as the only edit a client
+needs; the playbook and catalogue are resources and the worker brief is a
+prompt. Every tool shells out to the scripts in `tools/`, so the server cannot
+give a verdict the command line would not. Install and registration are in
+[`mcp/README.md`](mcp/README.md).
+
 ## Data-format knowledge is a decomp input
 
 The second gap above deserves more than a footnote, because it is the one that

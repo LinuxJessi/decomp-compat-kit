@@ -74,6 +74,7 @@ ROOTFS = Path(os.environ.get('EE_ROOTFS', Path.home() / 'ee-rootfs')).expanduser
 SANDBOXES = Path(os.environ.get('DECOMP_SANDBOXES', Path.home() / '.cache' / 'decomp-match')).expanduser()
 UNIT = os.environ.get('DECOMP_UNIT', 'main')                       # the upstream unit the sandbox judges
 BINARY = os.environ.get('DECOMP_BINARY', 'SLUS_204.69')             # the original ELF's file name in DECOMP_GAME_DIR
+RESIDENT = os.environ.get('DECOMP_RESIDENT', 'SLUS_204.69')         # the always-loaded image an overlay calls into
 UNVERIFIABLE_STOP = 2
 NO_PROGRESS_DEFAULT = 4
 CARD_LIMIT = 2048
@@ -194,9 +195,14 @@ def locate(name, upstream=UPSTREAM, warn=None):
 # ---------------------------------------------------------------- disassembly
 
 def load_symbols():
+    """Symbols of BINARY, plus the resident image's GLOBAL symbols when BINARY is an
+    overlay (an overlay's calls into the main executable must resolve by name too;
+    the overlays themselves share one load window, so no other overlay is read)."""
     by_name, by_va, starts = {}, {}, []
     for r in csv.DictReader(open(SYMBOLS)):
-        if r['binary'] != BINARY or not r['name'] or r['name'].startswith(('gcc2_compiled', '__gnu_compiled')):
+        if not r['name'] or r['name'].startswith(('gcc2_compiled', '__gnu_compiled')):
+            continue
+        if r['binary'] != BINARY and not (BINARY != RESIDENT and r['binary'] == RESIDENT and r['bind'] == 'GLOBAL'):
             continue
         va, size = int(r['va'], 16), int(r['size'] or 0)
         by_name.setdefault(r['name'], (va, size))
@@ -295,7 +301,9 @@ def disassemble(name):
     gp = by_name.get('_gp', (None,))[0]
     image = binary().read_bytes()
     segments = image_segments(image)
-    data = image[va - vd.TEXT_VA + vd.TEXT_OFF: va - vd.TEXT_VA + vd.TEXT_OFF + size]
+    data = image_bytes(image, segments, va, size)          # placement from the image's program headers
+    if data is None or len(data) < size:
+        sys.exit(f'{name}: {va:#x} is not inside a loaded segment of {binary().name}')
     hi, rows = {}, []
     for i in range(0, size, 4):
         word, = struct.unpack_from('<I', data, i)
@@ -585,7 +593,7 @@ def probe(name):
         return ['rabbitizer is not installed for this interpreter: the probe cannot read the original code '
                 '(run the kit through its venv, or pip install rabbitizer==1.16.2)']
     vd = verifier()
-    syms = vd.Symbols(SYMBOLS)
+    syms = vd.Symbols(SYMBOLS, binary=BINARY)
     by_name, by_va, starts = load_symbols()
     va, size, rows = disassemble(name)
     indirect = any(t.split()[0] == 'jr' and '$ra' not in t for _v, _w, t, _a, _n in rows)
@@ -675,7 +683,7 @@ def judge(sandbox, budget, compiler=None):
     work, report = sandbox / 'work', sandbox / 'last.json'
     report.unlink(missing_ok=True)                # the verifier wipes work/obj per run: whatever exists after is this run's
     argv = [sys.executable, str(KIT / 'tools' / 'verify_decomp.py'), '--upstream', str(sandbox / 'upstream'),
-            '--tu', budget['tu'], '--symbols', str(SYMBOLS), '--binary', str(image_path),
+            '--unit', UNIT, '--tu', budget['tu'], '--symbols', str(SYMBOLS), '--binary', str(image_path),
             '--rootfs', str(ROOTFS), '--work', str(work), '--out', str(report), '-v', '--compiler', compiler]
     if compiler == 'contract':
         argv += ['--toolchains', str(budget.get('toolchains') or toolchains_dir())]
@@ -710,7 +718,7 @@ def judge(sandbox, budget, compiler=None):
     if warnings:
         out['detail'].append('ASWARN (assembler warning, informational under stock): ' + warnings[0])
     image = image_path.read_bytes()
-    o = vd.Object(obj, vd.Symbols(SYMBOLS), image=image)
+    o = vd.Object(obj, vd.Symbols(SYMBOLS, binary=BINARY), image=image)
     target = next((f for f in o.funcs if f['name'] == budget['function']), None)
     if target is None:
         out['detail'] = [f"{budget['function']} was not emitted (still INCLUDE_ASM, renamed, or an unused static)"]
@@ -724,7 +732,7 @@ def judge(sandbox, budget, compiler=None):
         out['detail'] = [f"undeclared name(s) in the candidate, absent from the symbol table: {', '.join(undeclared)}"
                          ' -- use the name the disassembly shows or an existing declaration']
         return out
-    off = target['va'] - vd.TEXT_VA + vd.TEXT_OFF
+    off = vd.image_offset(vd.image_segments(image), target['va'])
     orig = image[off:off + target['size']]
     obj_size = target.get('obj_size') or target['size']
     if obj_size != target['size'] and compiler == 'contract':
