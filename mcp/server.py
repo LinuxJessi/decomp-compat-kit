@@ -46,6 +46,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -65,6 +66,7 @@ BINARY = os.environ.get("DECOMP_BINARY", "SLUS_204.69")
 UNIT = os.environ.get("DECOMP_UNIT", "main")
 ROOTFS = Path(os.environ.get("EE_ROOTFS", Path.home() / "ee-rootfs")).expanduser()
 SYMBOLS = KIT / "symbols" / "symbols.csv"
+DOCKER_IMAGE = os.environ.get("DECOMP_IMAGE", "debian:bookworm-slim")   # verify_decomp.py --image: passed to every verify run and to the probe
 TEXT_LIMIT = 12000            # characters of tool stdout returned before truncation
 DOCS = {"playbook": "MATCHING-PLAYBOOK.md", "toolchain-differences": "TOOLCHAIN-DIFFERENCES.md",
         "corpus": "CORPUS.md", "readme": "../README.md"}
@@ -139,6 +141,76 @@ def match_kit_module():
     return mod
 
 
+def toolchains_dir() -> Path | None:
+    """DECOMP_TOOLCHAINS, else <upstream>/.work/toolchains: the same rule as verify_decomp.py."""
+    tc = os.environ.get("DECOMP_TOOLCHAINS") or (str(UPSTREAM / ".work" / "toolchains") if UPSTREAM else None)
+    return Path(tc).expanduser() if tc else None
+
+
+_PROBED: dict[tuple[str, str], bool] = {}     # (resolved path, image) -> True: successes only, per process
+
+
+def docker_sees(path: Path, test: str, timeout: int = 180) -> dict[str, Any]:
+    """Mount PATH read-only into the kit's box (the same `-v` bind and `--platform linux/386`
+    verify_decomp.py uses, so the probe sees what the build sees) and run the shell TEST
+    there. A directory that exists on the host can still be empty inside the box: on the
+    first machine colima shared /Users but not the separate volume mounted at ~/kosmos,
+    and the contract cc1 then failed with "cannot open shared object file" (rc 127) on
+    every TU. `kind` tells a failed probe ("unshared") from docker itself failing
+    ("docker": no daemon, no image after the pull timeout). Successes are cached for the
+    process: the mount topology does not change under a running server, and a probe is
+    a container start (seconds; the first one may also pull the image)."""
+    key = (str(path.resolve()), DOCKER_IMAGE)
+    if _PROBED.get(key):
+        return dict(ok=True, cached=True)
+    cmd = ["docker", "run", "--rm", "--platform", "linux/386", "-v", f"{path.resolve()}:/probe:ro",
+           DOCKER_IMAGE, "/bin/sh", "-c", test]
+    try:
+        d = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return dict(ok=False, kind="docker", error="docker: command not found")
+    except subprocess.TimeoutExpired:
+        return dict(ok=False, kind="docker", error=f"docker probe exceeded {timeout} s (a first run pulls {DOCKER_IMAGE}; "
+                                                    "run `docker pull --platform linux/386 " + DOCKER_IMAGE + "` and retry)")
+    if d.returncode == 0:
+        _PROBED[key] = True
+        return dict(ok=True)
+    err = d.stderr.strip()[-300:]
+    if err and "docker" in err.lower() and "daemon" in err.lower():
+        return dict(ok=False, kind="docker", error=err)
+    return dict(ok=False, kind="unshared", error=err or f"`{test}` failed inside the box")
+
+
+def contract_probe() -> str:
+    """The shell test a usable toolchains mount passes: the kit-default pair verify_decomp.py
+    prefers (its CONTRACT_CC1/CONTRACT_AS), or else any pinned `<name>/bin/cc1` for a decomp
+    whose contract comes from config/toolchain-identity.json."""
+    try:
+        spec = importlib.util.spec_from_file_location("verify_decomp", TOOLS / "verify_decomp.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        pair = f"( test -r /probe/{shlex.quote(mod.CONTRACT_CC1)} && test -r /probe/{shlex.quote(mod.CONTRACT_AS)} ) || "
+    except Exception:
+        pair = ""
+    return pair + "ls /probe/*/bin/cc1 >/dev/null 2>&1"
+
+
+def contract_blocker() -> str | None:
+    """None when a contract build can run; otherwise why it cannot, so verify_* and match_init
+    refuse up front instead of reporting every TU as BUILD FAILED."""
+    tc = toolchains_dir()
+    if not tc or not tc.is_dir():
+        return f"no toolchains directory ({tc}): set DECOMP_TOOLCHAINS to the decomp's pinned toolchains"
+    seen = docker_sees(tc, contract_probe())
+    if seen["ok"]:
+        return None
+    if seen.get("kind") == "docker":
+        return f"docker cannot run the kit's box: {seen['error']}"
+    return (f"{tc} holds no pinned cc1 visible inside the docker box ({seen['error']}): the directory is not "
+            "shared with docker (on macOS/colima only /Users is, not a separate volume mounted under it); "
+            "point DECOMP_TOOLCHAINS at a copy on the shared disk")
+
+
 # ---------------------------------------------------------------- doctor
 
 @server.tool(annotations=READ_ONLY, description="Report the server's configuration and whether each dependency "
@@ -153,13 +225,27 @@ def doctor() -> dict[str, Any]:
     checks["symbols"] = dict(path=str(SYMBOLS), ok=SYMBOLS.is_file())
     checks["rootfs"] = dict(path=str(ROOTFS), ok=(ROOTFS / "lib" / "ld-linux.so.2").is_file()
                             and (ROOTFS / "opt" / "ee" / "bin" / "ee-as").is_file())
-    tc = os.environ.get("DECOMP_TOOLCHAINS") or (str(UPSTREAM / ".work" / "toolchains") if UPSTREAM else None)
-    checks["toolchains"] = dict(path=tc, ok=bool(tc and Path(tc).is_dir()))
+    manifest = UPSTREAM / "config" / "tu-build.json" if UPSTREAM else None
+    checks["manifest"] = dict(path=str(manifest), ok=bool(manifest and manifest.is_file()),
+                              note=None if manifest and manifest.is_file() else
+                              "verify_* and match_init discover TUs from config/tu-build.json + config/tu/<unit>/; "
+                              "upstream trees without them (Opok's) need the files copied in (git ignores them)")
+    tc = toolchains_dir()
+    checks["toolchains"] = dict(path=str(tc) if tc else None, ok=bool(tc and tc.is_dir()))
     try:
         d = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"], capture_output=True, text=True, timeout=20)
         checks["docker"] = dict(ok=d.returncode == 0, version=d.stdout.strip() or d.stderr.strip()[-200:])
     except (OSError, subprocess.TimeoutExpired) as e:
         checks["docker"] = dict(ok=False, error=str(e))
+    if checks["toolchains"]["ok"] and checks["docker"]["ok"]:
+        # The host-side is_dir() is not enough: the box must see the pinned cc1 through the mount.
+        seen = docker_sees(tc, contract_probe())
+        checks["toolchains"]["visible_in_docker"] = seen["ok"]
+        if not seen["ok"]:
+            checks["toolchains"]["ok"] = False
+            checks["toolchains"]["error"] = seen["error"]
+            checks["toolchains"]["note"] = ("contract builds would fail on every TU; point DECOMP_TOOLCHAINS at a "
+                                            "directory docker shares (on macOS/colima: under /Users, not a separate volume)")
     try:
         import rabbitizer  # noqa: F401
         checks["rabbitizer"] = dict(ok=True)
@@ -254,33 +340,58 @@ def name_transfer_symbols(donor: str, donor_symbols: str, acceptor: str, out_tsv
 def triage_function(name_or_va: str, binary: str | None = None) -> dict[str, Any]:
     b = binary or BINARY
     sel = ["--va", name_or_va] if name_or_va.lower().startswith("0x") else ["--name", name_or_va]
-    r = run("triage.py", ["--elf", str(GAME / b), "--symbols", str(SYMBOLS), "--binary", b] + sel + ["--json", "-"],
-            timeout=300)
-    data = parse_json_tail(r["stdout"])
-    if data is None and r["stdout"]:
-        return dict(tsv=r["stdout"], rc=r["rc"], stderr=r["stderr"])
-    return dict(result=data, rc=r["rc"], stderr=r["stderr"])
+    data, r = triage_json(["--binary", b] + sel, b, timeout=300)
+    funcs = (data or {}).get("functions") or []
+    return dict(result=funcs[0] if len(funcs) == 1 else None, report=data, rc=r["rc"], stderr=r["stderr"])
+
+
+def triage_json(args: list[str], binary: str, timeout: int) -> tuple[dict | None, dict]:
+    """Run triage.py with `--json` into a temp file and return (its report, the run). triage.py
+    takes a file path there (`-` once wrote a file named `-` into the kit root), and the TSV on
+    stdout is capped at TEXT_LIMIT (the OV01 table is 58 KB), so the file is the only complete
+    source of rows."""
+    with tempfile.NamedTemporaryFile(prefix="triage-", suffix=".json", delete=False) as fh:
+        out = Path(fh.name)
+    try:
+        r = run("triage.py", ["--elf", str(GAME / binary), "--symbols", str(SYMBOLS)] + args + ["--json", str(out)],
+                timeout=timeout)
+        try:
+            data = json.loads(out.read_text())
+        except (OSError, ValueError):
+            data = None
+    finally:
+        out.unlink(missing_ok=True)
+    return data, r
+
+
+CLASS_ORDER = ("trivial", "easy", "medium", "hard", "cop2", "huge")
+
+
+def triage_row(r: dict) -> dict:
+    """The TSV columns of triage.py (tsv_row), from a JSON record."""
+    return dict(name=r.get("name"), va=r.get("va"), size=r.get("size"), **{"class": r.get("cls")}, score=r.get("score"),
+                instr=r.get("instruction_count"), callees=r.get("callee_count"), switch=len(r.get("switch_jumps") or []),
+                cop2=r.get("cop2_count"), quad=r.get("quad_count"), g_hint=r.get("g_hint"), flags=",".join(r.get("flags") or []))
 
 
 @server.tool(annotations=READ_ONLY, description="Triage every function of a binary and return the easiest `limit` "
              "rows (optionally restricted to classes, e.g. 'trivial,easy') plus the class histogram.")
 def triage_unit(binary: str | None = None, classes: str | None = None, limit: int = 40) -> dict[str, Any]:
     b = binary or BINARY
-    r = run("triage.py", ["--elf", str(GAME / b), "--symbols", str(SYMBOLS), "--binary", b, "--summary"], timeout=600)
-    lines = [l for l in r["stdout"].splitlines() if l.strip()]
-    header = next((l for l in lines if l.startswith("name\t")), None)
-    rows, summary = [], []
+    # `--summary` prints the class histogram INSTEAD of the rows, and the TSV on stdout is capped
+    # at TEXT_LIMIT, so the rows come from the JSON report and the histogram is built from them.
+    data, r = triage_json(["--binary", b], b, timeout=600)
+    records = (data or {}).get("functions") or []
     keep = {c.strip() for c in classes.split(",")} if classes else None
-    for l in lines:
-        if l.startswith("name\t") or l.startswith("#"):
-            continue
-        parts = l.split("\t")
-        if header and len(parts) >= 4 and parts[1].startswith("0x"):
-            if keep is None or parts[3] in keep:
-                rows.append(dict(zip(header.split("\t"), parts)))
-        else:
-            summary.append(l)
-    return dict(binary=b, rows=rows[:limit], total_rows=len(rows), summary="\n".join(summary[-20:]),
+    histogram: dict[str, int] = {}
+    for rec in records:
+        histogram[rec.get("cls")] = histogram.get(rec.get("cls"), 0) + 1
+    rows = [triage_row(rec) for rec in sorted(records, key=lambda rec: (rec.get("score", 0), rec.get("size", 0)))
+            if keep is None or rec.get("cls") in keep]
+    order = [k for k in CLASS_ORDER if k in histogram] + sorted(k for k in histogram if k not in CLASS_ORDER)
+    return dict(binary=b, rows=rows[:limit], total_rows=len(rows), histogram=histogram,
+                outside_image=len((data or {}).get("skipped") or []),
+                summary=f"functions: {len(records)} triaged; class: " + " ".join(f"{k}={histogram[k]}" for k in order),
                 rc=r["rc"], stderr=r["stderr"])
 
 
@@ -336,12 +447,14 @@ def job_status(job_id: str, tail: int = 25) -> dict[str, Any]:
 def verify_unit_start(compiler: str = "stock", unit: str | None = None, baseline: str | None = None) -> dict[str, Any]:
     if not UPSTREAM:
         return dict(error="DECOMP_UPSTREAM is not configured")
+    if compiler == "contract" and (why := contract_blocker()):
+        return dict(error=why)
     u = unit or UNIT
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     report = JOBS_DIR / f"verify-{u}-{compiler}-{time.strftime('%Y%m%d-%H%M%S')}.json"
     args = ["--upstream", str(UPSTREAM), "--unit", u, "--symbols", str(SYMBOLS), "--binary", str(GAME / BINARY),
             "--compiler", compiler, "--rootfs", str(ROOTFS), "--work", str(Path.home() / ".cache" / "decomp-verify-mcp"),
-            "--docker-timeout", "1800", "--out", str(report)]
+            "--docker-timeout", "1800", "--image", DOCKER_IMAGE, "--out", str(report)]
     if baseline:
         args += ["--baseline", baseline]
     job = start_job("verify", "verify_decomp.py", args)
@@ -357,12 +470,15 @@ def verify_unit_start(compiler: str = "stock", unit: str | None = None, baseline
 def verify_tu(tu: str, compiler: str = "stock") -> dict[str, Any]:
     if not UPSTREAM:
         return dict(error="DECOMP_UPSTREAM is not configured")
+    if compiler == "contract" and (why := contract_blocker()):
+        return dict(error=why)
     unit = tu.split("/")[0] if "/" in tu else UNIT
     report = JOBS_DIR / f"verify-{tu.replace('/', '__')}-{compiler}.json"
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     r = run("verify_decomp.py", ["--upstream", str(UPSTREAM), "--unit", unit, "--tu", tu, "--symbols", str(SYMBOLS),
                                  "--binary", str(GAME / BINARY), "--compiler", compiler, "--rootfs", str(ROOTFS),
-                                 "--work", str(Path.home() / ".cache" / "decomp-verify-mcp"), "--out", str(report), "-v"],
+                                 "--work", str(Path.home() / ".cache" / "decomp-verify-mcp"), "--image", DOCKER_IMAGE,
+                                 "--out", str(report), "-v"],
             timeout=900)
     rep = None
     if report.is_file():
@@ -409,6 +525,11 @@ def probe_toolchain_start(cc1: str | None = None, ee_as: str | None = None, tool
 def match_init(function: str, forms: int = 30, compiler: str | None = None, author: str | None = None,
                no_progress_stop: int | None = None) -> dict[str, Any]:
     args = ["init", function, "--forms", forms]
+    # match_kit picks the contract compiler whenever the pinned toolchains resolve, so an omitted
+    # compiler is probed exactly when the kit would build with them.
+    effective = compiler or match_kit_module().default_compiler()
+    if effective == "contract" and (why := contract_blocker()):
+        return dict(error=why, hint="pass compiler='stock' to match against the stock rootfs pair instead")
     if compiler:
         args += ["--compiler", compiler]
     if author:
@@ -470,6 +591,17 @@ def match_source(sandbox: str, prelude_lines: int = 40) -> dict[str, Any]:
                 prelude="\n".join(text.splitlines()[:prelude_lines]), lines=text.count("\n") + 1)
 
 
+def unique_anchor(lines: list[str], text: str, from_end: bool, limit: int = 6) -> str:
+    """The shortest run of LINES at the stub's side (the last ones when from_end, else the
+    first) that occurs exactly once in TEXT: usually the neighbouring INCLUDE_ASM line or a
+    signature, so an edit elsewhere in the file (a typedef, an include) leaves it valid."""
+    for n in range(1, min(limit, len(lines)) + 1):
+        candidate = "\n".join(lines[-n:] if from_end else lines[:n])
+        if candidate.strip() and text.count(candidate) == 1:
+            return candidate
+    return ""
+
+
 @server.tool(annotations=LOCAL_WRITE, description="Write your C for the sandbox's function: replaces its INCLUDE_ASM "
              "stub (or its current body) with `c_text`; `declarations` (externs, typedefs) are inserted just before "
              "the function. This is the only edit the loop needs; then call match_check.")
@@ -483,18 +615,54 @@ def match_write_function(sandbox: str, c_text: str, declarations: str = "") -> d
     name = b["function"]
     mk = match_kit_module()
     block = (declarations.rstrip() + "\n\n" if declarations.strip() else "") + c_text.strip() + "\n"
+    # A rewrite replaces everything the stub replacement inserted (declarations, leading comment,
+    # body), or every call leaves another copy of the externs and the comment above the function
+    # (three copies after three forms on the first run). The inserted region is bracketed by the
+    # file's own lines around the stub, recorded at the first write: they belong to the base TU, so
+    # they survive a hand edit inside the block and a match_best restore, which a memo of the
+    # block's text does not (roundtable, 2026-10-31).
+    memo = sb / "mcp-write-anchors.json"
+    try:
+        anchors = json.loads(memo.read_text())
+    except (OSError, ValueError):
+        anchors = {}
     stub = re.search(r'^INCLUDE_ASM\("[^"]*",\s*' + re.escape(name) + r'\);[ \t]*\n?', text, re.M)
+    warning = None
     if stub:
+        anchors = dict(before=unique_anchor(text[:stub.start()].rstrip("\n").split("\n"), text, from_end=True),
+                       after=unique_anchor(text[stub.end():].lstrip("\n").split("\n"), text, from_end=False))
+        if not (anchors["before"] and anchors["after"]):
+            anchors = {}
+            warning = "the lines around the stub are not unique in the file: a rewrite will replace the body only"
         new = text[:stub.start()] + block + text[stub.end():]
         how = "replaced INCLUDE_ASM stub"
     else:
-        body = mk.function_text(text, name)
-        if body is None or body not in text:
-            return dict(error=f"{name}: neither an INCLUDE_ASM stub nor a definition found in {b['path']}")
-        new = text.replace(body + "\n", block, 1) if body + "\n" in text else text.replace(body, block.rstrip("\n"), 1)
-        how = "replaced existing definition"
+        start = end = -1
+        if anchors.get("before") and anchors.get("after") and text.count(anchors["before"]) == 1 \
+                and text.count(anchors["after"]) == 1:
+            start = text.index(anchors["before"]) + len(anchors["before"])
+            end = text.index(anchors["after"])
+        if 0 <= start < end:
+            region = text[start:end]                      # keep the blank lines the first write left around the block
+            lead = region[:len(region) - len(region.lstrip("\n"))]
+            trail = region[len(region.rstrip("\n")):]
+            new = text[:start] + lead + block.rstrip("\n") + trail + text[end:]
+            how = "replaced the previous write (declarations, comment and body)"
+        else:
+            body = mk.function_text(text, name)
+            if body is None or body not in text:
+                return dict(error=f"{name}: neither an INCLUDE_ASM stub nor a definition found in {b['path']}")
+            new = text.replace(body + "\n", block, 1) if body + "\n" in text else text.replace(body, block.rstrip("\n"), 1)
+            how = "replaced existing definition"
+            warning = ("the lines recorded around the stub were not found once each (edited?): only the body was "
+                       "replaced, declarations written earlier stay above it")
     path.write_text(new)
-    return dict(ok=True, how=how, path=str(path), function=name, bytes=len(new))
+    if anchors:
+        memo.write_text(json.dumps(anchors))
+    out = dict(ok=True, how=how, path=str(path), function=name, bytes=len(new))
+    if warning:
+        out["warning"] = warning
+    return out
 
 
 @server.tool(annotations=LOCAL_WRITE, description="Exact single-occurrence text replacement in the sandbox source "

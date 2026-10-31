@@ -77,6 +77,86 @@ sandbox. The function itself is still open: the original forms the slot
 address as actor plus (index plus 0x8DC) and keeps the scaled index in a second
 register, a shape no typed spelling tried so far reproduces.
 
+## Second run (2026-10-31): the OV01 lane-2 output over stdio
+
+Driven from a script with the SDK's `Client(StdioServerParameters(...))` (result
+fields are snake_case: `resource_templates`, `uri_template`, `structured_content`),
+against the lane worktree `~/kosmos/xsg/.work/ov01-l2` at `f2c148c` (branch
+`ov01-lane2`, 72 lane functions, merged with Opok's master `9fb2a68`). Discovery
+needs the private TU manifest, which Opok's tree does not carry: `config/tu-build.json`
+and `config/tu/ov01/` were copied into the worktree as ignored files.
+
+- `verify_unit_start` stock: 611 match, 167 skip, 97 classified (mixed 42,
+  size-diff 18, unexplained 15, hazard-nop 13, immediate 5, delay-slot 3,
+  reorder 1); 16 of the 72 lane functions differ under the unpatched pair.
+- `verify_unit_start` contract (the kit-default fsv3 pair): 694 match, 161 skip,
+  20 differ; of the 72 lane functions 66 match, 2 differ by 2-4 words
+  (`entryPhase20`, `entryPhase35`, like seven `entryPhase*` already in master:
+  the kit's contract cc1 is older than Opok's current pin, whose recipe in
+  `config/toolchain-identity.json` now lists fsv1..fsv12), 4 are skipped.
+  Opok's whole-file gate on the same tree: OV01.OVL byte-identical.
+- The match loop on `tgtUnitAdrGet` (blocked in Opok's link: `pTgtUnit`/`pTgtUnit2`
+  sit in an unclaimed BSS gap, so the kit is the only judge it has): init, card,
+  disasm, source, edit, write, check, verdict, best, patch, list, the three
+  resources and the prompt all answered. Five forms, best `SIZE_DIFF` 14 words
+  (96 B vs 92 B): the original hoists `&pTgtUnit` once and takes a `bnel` on
+  `mode < 8`; no spelling of the range chain reproduced that yet.
+
+Found on the way (all four fixed the same day; the probe, the memo and the
+temp file are in `server.py`, re-tested over stdio against the same tree):
+
+
+- `~/kosmos` is its own APFS volume and colima does not share it, so docker sees
+  an empty `/toolchains`; cc1 fails with `cannot open shared object file` (rc 127)
+  and every TU reports BUILD FAILED. `doctor` says the toolchains are fine because
+  its check is a host-side `is_dir()`. Point `DECOMP_TOOLCHAINS` at a copy under
+  `/Users/jessi/Desktop`. Fixed: `doctor` now runs `docker_sees()` (the pinned cc1 must
+  be listable through the mount, `visible_in_docker`), and `verify_tu`, `verify_unit_start`
+  and `match_init` refuse a contract run up front with the same reason (`contract_blocker()`).
+- `match_write_function` on an existing definition re-inserts `declarations`
+  every call: after three writes the patch carried three copies of the externs
+  and the prototype (legal C, so the verdict is unaffected, but the patch is not).
+  Fixed: the block of the previous write (declarations, comment, body) is remembered in
+  `SANDBOX/mcp-last-write.json` and replaced whole on the next call.
+- `triage_unit` runs `triage.py --summary`, which prints only the histogram, so
+  its `rows` are always empty. Fixed: the default table is parsed and the histogram
+  built from its class column.
+- A tracked file named `-` sat in the kit root: `triage_function` passed `--json -` and
+  triage.py takes a file path. Fixed: a temp file, read and deleted; the stray file is removed.
+- `doctor` also reports `manifest`: the private `config/tu-build.json` the TU discovery needs.
+
+## Roundtable on the fixes (2026-10-31)
+
+Five seats reviewed the diff (openai gpt-6-sol, google gemini-3.1-pro, deepseek
+v4-pro, moonshot kimi-k3, alibaba qwen3.8-max, through Hermes' `nous` provider;
+brief = the diff plus the findings above; transcripts under
+`~/kosmos/xsg/.work/moa/roundtable-mcp/`). Checked against the code and applied:
+
+- `triage_unit` built its rows from stdout, which `run()` caps at `TEXT_LIMIT`
+  (12 KB; the OV01 table is 58 KB), so it silently returned 233 of 496 easy rows
+  (openai). Both triage tools now read the `--json` report (`triage_json`).
+- The `match_init` guard had to mirror `match_kit.default_compiler()` for an
+  omitted compiler (5/5): it now probes exactly when the kit would build with
+  the contract pair.
+- A memo of the previous block's text breaks on a `match_best` restore and on a
+  hand edit inside the block (5/5): rewrites are now bracketed by the shortest
+  unique run of the file's own lines beside the stub (`mcp-write-anchors.json`),
+  which survive both; losing them falls back to the body with a `warning`.
+- A probe timeout (the first run pulls the image) read as "unshared" (4/5): the
+  probe reports `kind` (`docker` vs `unshared`), its timeout is 180 s, successes
+  are cached per process and failures never are (5/5).
+- `DECOMP_IMAGE` is passed to the verify runs, so the probe and the build use one
+  image (alibaba, openai); the probe tests the kit-default pair by name, else any
+  `<name>/bin/cc1` (openai, alibaba).
+
+Taken as leads, not applied: `--mount` instead of `-v` (the build itself binds
+with `-v`; the probe mirrors it), marker comments around the block (they would
+land in matched source), dropping `--platform linux/386` (the build uses it).
+Claims they asked to verify, verified: Opok's tree carries no
+`config/tu-build.json` (git-ignored there); the `-` file was committed in
+79ad44e; the unshared volume was observed directly with an alpine `ls` through
+the same bind. Tests: `mcp/test_server.py` (13, no docker).
+
 ## Not yet
 
 - The tasks extension once the SDK carries it (replaces the job handles).
