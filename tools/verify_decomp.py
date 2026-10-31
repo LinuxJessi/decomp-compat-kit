@@ -89,6 +89,7 @@ import argparse
 import collections
 import csv
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -663,6 +664,25 @@ def contract_from_identity(upstream, name=None):
     return None
 
 
+def upstream_cc1_pin(upstream, name=None):
+    """SHA-256 the upstream pins for the cc1 of its 2.96 contract (toolchain-identity.json
+    tools.<compiler>.files.cc1), or None."""
+    if not upstream:
+        return None
+    try:
+        d = json.loads((Path(upstream) / "config" / "toolchain-identity.json").read_text())
+    except (OSError, ValueError):
+        return None
+    c = contract_from_identity(upstream, name)
+    if not c:
+        return None
+    for cname, cc in (d.get("contracts") or {}).items():
+        if cname == c["contract"]:
+            tool = (d.get("tools") or {}).get(cc.get("compiler")) or {}
+            return (tool.get("files") or {}).get("cc1")
+    return None
+
+
 def resolve_contract(toolchains, upstream=None, overrides=None, name=None):
     """The contract toolchain to drive, or None. Candidates in order: explicit
     overrides (--contract-cc1/--contract-as, or DECOMP_CONTRACT_CC1/DECOMP_CONTRACT_AS),
@@ -791,16 +811,20 @@ def discover_tus(up: Path, unit: str, warn=None) -> list:
     config/objects/<unit>.compile.json is only a fallback, reported through `warn`,
     because it goes stale (63 C TUs listed against 158 built on 2026-09-27)."""
     up = Path(up)
+    # The private manifest may live OUTSIDE the tree (DECOMP_MANIFEST_DIR): a copy inside a
+    # checkout the upstream's own configure builds makes that configure refuse (its data
+    # carve reads config/tu-build.json as the provider contract, 2026-10-31).
+    mdir = Path(os.environ["DECOMP_MANIFEST_DIR"]).expanduser() if os.environ.get("DECOMP_MANIFEST_DIR") else up
     out = []
     try:
-        entries = json.loads((up / "config" / "tu-build.json").read_text()).get("tus") or []
+        entries = json.loads((mdir / "config" / "tu-build.json").read_text()).get("tus") or []
     except (OSError, ValueError, AttributeError):
         entries = []
     for entry in entries:
         if not isinstance(entry, dict) or entry.get("unit") != unit or not entry.get("id") or not entry.get("path"):
             continue
         try:
-            ledger = json.loads((up / "config" / "tu" / unit / (entry["id"].split("/")[-1] + ".json")).read_text())
+            ledger = json.loads((mdir / "config" / "tu" / unit / (entry["id"].split("/")[-1] + ".json")).read_text())
         except (OSError, ValueError):
             ledger = {}
         contract = ledger.get("contract") or entry.get("contract") or {}
@@ -809,6 +833,25 @@ def discover_tus(up: Path, unit: str, warn=None) -> list:
                         flags=list(contract.get("flags") or []), compiler_profile=contract.get("compiler_profile") or ""))
     if out:
         return sorted(out, key=lambda e: e["id"])
+    # The upstream's PUBLIC per-unit compile manifest (config/objects/overlays.compile.json,
+    # units.<unit>.tus): id from the ordinal (ov01/tu004, as the private ledgers name it),
+    # source, kind, in_scope, flags and the compiler id; enough for every verify.
+    public = up / "config" / "objects" / "overlays.compile.json"
+    try:
+        tus = (json.loads(public.read_text()).get("units") or {}).get(unit, {}).get("tus") or []
+    except (OSError, ValueError, AttributeError):
+        tus = []
+    found = []
+    for v in tus:
+        if not isinstance(v, dict) or not v.get("source") or v.get("ordinal") is None:
+            continue
+        comp = v.get("compiler") or {}
+        found.append(dict(id=f"{unit}/tu{int(v['ordinal']):03d}", path=v["source"], mode=v.get("kind"),
+                          in_scope=bool(v.get("in_scope")), flags=list(v.get("flags") or []),
+                          compiler_profile=str(comp.get("id") or "").replace(".", "_").replace("-", "_", 0),
+                          compile_id=v.get("id"), name=v.get("name")))
+    if found:
+        return sorted(found, key=lambda e: e["id"])
     manifest = up / "config" / "objects" / f"{unit}.compile.json"
     try:
         tus = json.loads(manifest.read_text())["tus"]
@@ -914,6 +957,13 @@ def self_test() -> int:
             a=dict(id="main/tu003", path="src/main/c.c", mode="c", in_scope=True, flags=["-G8"], compiler_profile="ee-gcc2_96-realconv-lp7")))))
         (up / "config" / "tu-build.json").unlink()
         fallback = discover_tus(up, "main", warn=warned.append)
+        (pub := work / "public"); (pub / "config" / "objects").mkdir(parents=True)
+        (pub / "config" / "objects" / "overlays.compile.json").write_text(json.dumps(dict(units=dict(ov01=dict(tus=[
+            dict(ordinal=4, id="ov01/tu004_00a10bb8", name="calc", source="src/ov01/calc.c", kind="c", in_scope=True,
+                 flags=["-O2", "-G0"], compiler=dict(id="ee-gcc2_96-realconv-lp7"))])))))
+        found_public = discover_tus(pub, "ov01")
+        checks["discover-public"] = ([(e["id"], e["path"], e["mode"], e["in_scope"], e["flags"], e["compiler_profile"][:10])
+                                      for e in found_public] == [("ov01/tu004", "src/ov01/calc.c", "c", True, ["-O2", "-G0"], "ee-gcc2_96")])
         checks["discover-fallback"] = ([(e["id"], e["mode"], e["flags"]) for e in fallback] == [("main/tu003", "c", ["-G8"])]
                                        and len(warned) == 1 and "stale" in warned[0])
         # text placement from program headers: two PT_LOADs, one of them with a .bss tail
@@ -1167,6 +1217,7 @@ def main() -> int:
 
     totals = collections.Counter()
     results, per_tu, matched = [], {}, {}
+    function_skips = []
     for job in jobs:
         if job["tag"] in failed:
             per_tu[job["tu"]] = {"build": "fail"}
@@ -1182,17 +1233,20 @@ def main() -> int:
             if not o.is_clean(f):
                 counts["skip"] += 1
                 totals["skip"] += 1
+                function_skips.append(dict(tu=job["tu"], func=f["name"], why="relocation the verifier cannot resolve"))
                 continue
             ours = o.bytes_for(f)
             off = image_offset(segments, f["va"])
             if off is None:                       # outside every loaded segment of this image
                 counts["skip"] += 1
                 totals["skip"] += 1
+                function_skips.append(dict(tu=job["tu"], func=f["name"], why="address outside the loaded image"))
                 continue
             orig = slus[off:off + f["size"]]
             if len(ours) != f["size"]:
                 counts["skip"] += 1
                 totals["skip"] += 1
+                function_skips.append(dict(tu=job["tu"], func=f["name"], why=f"object bytes {len(ours)} vs symbol size {f['size']}"))
                 continue
             kind, detail = judge_sizes(*classify(ours, orig), f.get("obj_size") or f["size"], f["size"], compiler)
             if kind == "size-diff" and delay_slot(o.object_bytes(f), orig):
@@ -1254,6 +1308,12 @@ def main() -> int:
         for line in regressions:
             print(f"    {line}")
 
+    pin = upstream_cc1_pin(up)
+    cc1_sha = hashlib.sha256(Path(tools[0]).read_bytes()).hexdigest() if (tools and compiler == "contract") else None
+    contract_current = (cc1_sha == pin) if (pin and cc1_sha) else None
+    if compiler == "contract" and pin:
+        print(f"  contract cc1 {'matches' if contract_current else 'DIFFERS FROM'} the upstream pin "
+              f"({pin[:16]}): {'current' if contract_current else 'reproduce the pin (its recipe is in config/toolchain-identity.json) and point --toolchains at it'}")
     if args.out:
         args.out.write_text(json.dumps(
             dict(compiler=compiler, work=str(work), toolchains=str(toolchains) if compiler == "contract" else None,
@@ -1262,9 +1322,11 @@ def main() -> int:
                                                     for va, off, fs, ms in segments],
                  tools=dict(cc1=str(tools[0]) if tools and compiler == "contract" else STOCK_CC1,
                             ee_as=str(tools[1]) if tools and compiler == "contract" else STOCK_AS),
+                 upstream_pin=pin, contract_cc1_sha256=cc1_sha, contract_current=contract_current,
                  rootfs=str(args.rootfs), jobs=len(jobs), totals=dict(totals), per_tu=per_tu,
                  matched=matched, mismatches=results, regressions=regressions, warnings=warnings,
-                 skipped=[dict(tu=t, why=w, msg=m) for t, w, m in skipped]), indent=1))
+                 skipped=[dict(tu=t, why=w, msg=m) for t, w, m in skipped],
+                 function_skips=function_skips), indent=1))
         print(f"\nwrote {args.out}")
     if totals["build-fail"]:
         print(f"\n  {totals['build-fail']} TU(s) failed to build: not verified", file=sys.stderr)

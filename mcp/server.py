@@ -18,6 +18,8 @@ never come from the model):
   DECOMP_RESIDENT     the always-loaded image an overlay calls into (default SLUS_204.69)
   EE_ROOTFS           the i386 rootfs with the stock ee-gcc 2.96 under opt/ee
   DECOMP_TOOLCHAINS   the decomp's pinned (contract) toolchains, optional
+  DECOMP_MANIFEST_DIR a directory holding the private config/tu-build.json + config/tu/ outside
+                      the upstream tree (optional; the public overlays.compile.json otherwise)
   DECOMP_SANDBOXES    where match sandboxes live (default ~/.cache/decomp-match)
   DECOMP_JOBS         where background job logs live (default ~/.cache/decomp-jobs)
 
@@ -39,6 +41,7 @@ stateless 2026-07-28 revision asks for anyway.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -225,13 +228,37 @@ def doctor() -> dict[str, Any]:
     checks["symbols"] = dict(path=str(SYMBOLS), ok=SYMBOLS.is_file())
     checks["rootfs"] = dict(path=str(ROOTFS), ok=(ROOTFS / "lib" / "ld-linux.so.2").is_file()
                             and (ROOTFS / "opt" / "ee" / "bin" / "ee-as").is_file())
-    manifest = UPSTREAM / "config" / "tu-build.json" if UPSTREAM else None
-    checks["manifest"] = dict(path=str(manifest), ok=bool(manifest and manifest.is_file()),
-                              note=None if manifest and manifest.is_file() else
-                              "verify_* and match_init discover TUs from config/tu-build.json + config/tu/<unit>/; "
-                              "upstream trees without them (Opok's) need the files copied in (git ignores them)")
+    mdir = Path(os.environ["DECOMP_MANIFEST_DIR"]).expanduser() if os.environ.get("DECOMP_MANIFEST_DIR") else UPSTREAM
+    manifest = mdir / "config" / "tu-build.json" if mdir else None
+    public = UPSTREAM / "config" / "objects" / "overlays.compile.json" if UPSTREAM else None
+    has_private, has_public = bool(manifest and manifest.is_file()), bool(public and public.is_file())
+    checks["manifest"] = dict(private=str(manifest), private_ok=has_private, public=str(public), public_ok=has_public,
+                              ok=has_private or has_public,
+                              note=("TU discovery uses the private manifest (config/tu-build.json + config/tu/<unit>/)" if has_private
+                                    else "TU discovery uses the upstream's public config/objects/overlays.compile.json" if has_public
+                                    else "no TU manifest: neither config/tu-build.json (DECOMP_MANIFEST_DIR) nor config/objects/overlays.compile.json"))
+    if has_private and not os.environ.get("DECOMP_MANIFEST_DIR") and UPSTREAM and (UPSTREAM / ".git").exists():
+        checks["manifest"]["warning"] = ("config/tu-build.json sits inside a git checkout: the upstream's own configure "
+                                         "reads it as the provider contract and refuses on a cc1 mismatch (data_carve); "
+                                         "keep the manifest outside and point DECOMP_MANIFEST_DIR at it")
     tc = toolchains_dir()
     checks["toolchains"] = dict(path=str(tc) if tc else None, ok=bool(tc and tc.is_dir()))
+    if tc and tc.is_dir() and UPSTREAM:
+        try:
+            spec = importlib.util.spec_from_file_location("verify_decomp", TOOLS / "verify_decomp.py")
+            vd = importlib.util.module_from_spec(spec); spec.loader.exec_module(vd)
+            pin = vd.upstream_cc1_pin(UPSTREAM)
+            pair = vd.resolve_contract(tc, UPSTREAM)
+            sha = hashlib.sha256(Path(pair["cc1_path"]).read_bytes()).hexdigest() if pair else None
+            checks["contract"] = dict(pair=pair["contract"] if pair else None, cc1=str(pair["cc1_path"]) if pair else None,
+                                      upstream_pin=pin, current=(sha == pin) if (pin and sha) else None)
+            if pin and not (pair and sha == pin):
+                checks["contract"]["note"] = ("the upstream pins a cc1 this toolchains directory does not hold: reproduce it "
+                                              "from config/toolchain-identity.json (KOS-MOS: kit/toolchain/fetch_compilers.py "
+                                              f"--root {tc}); until then contract verdicts use the older pair and can differ "
+                                              "by a few words on functions the newer patches change")
+        except Exception as e:
+            checks["contract"] = dict(error=str(e)[-200:])
     try:
         d = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"], capture_output=True, text=True, timeout=20)
         checks["docker"] = dict(ok=d.returncode == 0, version=d.stdout.strip() or d.stderr.strip()[-200:])
@@ -393,6 +420,52 @@ def triage_unit(binary: str | None = None, classes: str | None = None, limit: in
                 outside_image=len((data or {}).get("skipped") or []),
                 summary=f"functions: {len(records)} triaged; class: " + " ".join(f"{k}={histogram[k]}" for k in order),
                 rc=r["rc"], stderr=r["stderr"])
+
+
+# ---------------------------------------------------------------- lint
+
+@server.tool(annotations=READ_ONLY, description="Static maintainer checks on one TU source of the configured upstream "
+             "(path relative to it, e.g. src/ov01/calc.c): prototypes placed after their definition, #defines and "
+             "prototypes nothing else in the TU names, goto statements, raw `& 0x..` masks, lines over `max_line`. With "
+             "`base` (a path to the same file from the base tree) only what the current file ADDS is reported. The gate "
+             "decides bytes; this lists what a human reviewer would flag.")
+def lint_tu(path: str, base: str | None = None, max_line: int = 120) -> dict[str, Any]:
+    if not UPSTREAM:
+        return dict(error="DECOMP_UPSTREAM is not configured")
+    src = (UPSTREAM / path) if not Path(path).is_absolute() else Path(path)
+    if not src.is_file():
+        return dict(error=f"no such file {src}")
+    text = src.read_text(errors="replace")
+    header = src.with_suffix(".h")
+    texts = text + ("\n" + header.read_text(errors="replace") if header.is_file() else "")
+    base_text = Path(base).read_text(errors="replace") if base and Path(base).is_file() else ""
+    base_lines = set(base_text.splitlines())
+    lines = [l for l in text.splitlines() if l not in base_lines] if base_text else text.splitlines()
+    out = dict(path=str(src), compared_to_base=bool(base_text), late_protos=[], unused=[], gotos=[], masks=[], long_lines=[])
+    for l in lines:
+        s = l.strip()
+        if len(l) > max_line:
+            out["long_lines"].append(s[:80] + "...")
+        if re.search(r"\bgoto\b", l) and not s.startswith(("*", "/*", "//")):
+            out["gotos"].append(s)
+        for mask in re.findall(r"&\s*(0x[0-9A-Fa-f]+)", l):
+            if not base_text or mask.lower() not in base_text.lower():
+                out["masks"].append(f"{mask} in `{s[:70]}`")
+        d = re.match(r"\s*#define\s+(\w+)", l)
+        p = re.match(r"\s*(?:extern\s+)?(?:static\s+)?[A-Za-z_][\w \*]*?\b(\w+)\s*\([^;{]*\)\s*;", l)
+        name = d.group(1) if d else (p.group(1) if p else None)
+        if not name or name.startswith("__builtin"):
+            continue
+        if len(re.findall(r"\b" + re.escape(name) + r"\b", texts)) <= 1:
+            out["unused"].append(name)
+        if p:
+            at = text.find(s)
+            defn = re.search(r"^[A-Za-z_][\w \*]*?\b" + re.escape(name) + r"\s*\([^;{]*\)\s*\{", text, re.M)
+            if defn and at > defn.start():
+                out["late_protos"].append(name)
+    for k in ("late_protos", "unused", "gotos", "masks", "long_lines"):
+        out[k] = sorted(set(out[k]))
+    return out
 
 
 # ---------------------------------------------------------------- jobs (long-running)

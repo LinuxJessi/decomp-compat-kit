@@ -185,5 +185,20 @@ class TriageFromJson(unittest.TestCase):
         self.assertFalse(list(HERE.parent.glob("-")), "triage must not write a file named '-' into the kit root")
 
 
+class LintTu(unittest.TestCase):
+    def test_late_proto_unused_goto_mask(self):
+        d = Path(tempfile.mkdtemp(prefix="lint-")); src = d / "x.c"
+        src.write_text("#define UNUSED_ONE 1\n#define USED_ONE 2\nint f(void)\n{\n    int v = USED_ONE & 0x40;\n    goto out;\nout:\n    return v;\n}\nint f(void);\n")
+        base = d / "base.c"; base.write_text("int f(void)\n{\n    return 0;\n}\n")
+        with mock.patch.object(server, "UPSTREAM", d):
+            out = server.lint_tu("x.c", base=str(base))
+        self.assertEqual(out["late_protos"], ["f"])
+        self.assertEqual(out["unused"], ["UNUSED_ONE"])
+        self.assertEqual(out["gotos"], ["goto out;"])
+        self.assertEqual(len(out["masks"]), 1)
+        with mock.patch.object(server, "UPSTREAM", d):
+            self.assertIn("error", server.lint_tu("nope.c"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

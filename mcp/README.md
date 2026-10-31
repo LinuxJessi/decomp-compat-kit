@@ -157,6 +157,29 @@ Claims they asked to verify, verified: Opok's tree carries no
 79ad44e; the unshared volume was observed directly with an alpine `ls` through
 the same bind. Tests: `mcp/test_server.py` (13, no docker).
 
+## Lessons applied (2026-10-31, after the PR round)
+
+- **Discovery without the private manifest.** `verify_decomp.discover_tus` now reads
+  the upstream's public `config/objects/overlays.compile.json` (units.<unit>.tus:
+  ordinal, source, kind, in_scope, flags, compiler id) when `config/tu-build.json`
+  is absent, and `DECOMP_MANIFEST_DIR` points at a private manifest kept OUTSIDE the
+  tree. Reason: the upstream's own configure reads an in-tree `config/tu-build.json`
+  as the provider contract and refuses on a cc1 mismatch, so the kit and that gate
+  could never share a worktree. `doctor` reports which manifest discovery uses and
+  warns about an in-tree private copy.
+- **The upstream pin is tracked.** Every contract report carries `upstream_pin`
+  (the cc1 SHA-256 the upstream's toolchain-identity.json pins), the cc1 actually
+  used and `contract_current`; the verify prints "contract cc1 matches the upstream
+  pin" or tells you to reproduce it. `doctor` shows the same under `contract`. With
+  the fsv12 pin reproduced into the kit's toolchains directory, calc verifies 93/93
+  under the pair the upstream really uses.
+- **Skips are itemized.** `function_skips` names each skipped function and why
+  (unresolvable relocation, address outside the image, object/symbol size mismatch).
+- **`lint_tu`.** Static maintainer checks on one TU (prototypes after their
+  definition, unused defines/prototypes, gotos, raw masks, long lines), optionally
+  only for what the file adds over a base copy. The compiler-warning diff against a
+  base build stays in the pack's `kit/public-lane/prepush-check.py`.
+
 ## Not yet
 
 - The tasks extension once the SDK carries it (replaces the job handles).
