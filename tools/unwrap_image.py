@@ -9,14 +9,25 @@ six titles probed while building this kit do not hand those over directly:
                   image is what inflates out of it (Metal Gear Solid 3: the
                   inflated image opens with a Konami container header whose
                   first word is the Unix build timestamp).
-  MWo3 overlay    Metrowerks CodeWarrior's linker overlay (Silent Hill 2 stage
-                  code, Yakuza's whole game in MAIN.BIN): a 0x40-byte header
-                  `[MWo3][u32 a][u32 load_addr][u32 text][u32 data][u32 bss]
-                  [u32 p][u32 q][name @0x20]`, then text and data. The two
-                  samples measured agree that load_addr maps file offset 0 (the
-                  header is part of the image: SH2's p == q == load_addr + file
-                  size == the start of .bss); word `a` (8 on SH2, 0 on Yakuza)
-                  and p/q beyond that are not understood and are reported raw.
+  MWo overlay     Metrowerks' linker overlay record (`MWo` + a version digit),
+                  the format CodeWarrior for PlayStation documents as
+                  `struct OverlayHeader` (Targeting PlayStation, R4 1998 / R5
+                  1999) and CodeWarrior for PS2 kept as version 3 (Silent Hill 2
+                  stage code, Yakuza's whole game in MAIN.BIN). 0x40 bytes:
+                  `[MWo][ver][overlayID][loadAddress][textSize][dataSize]
+                  [word5][word6][word7][overlayName @0x20]`, then text and data.
+                  overlayID is the index into the linker's
+                  `_overlay_section_addreses[]` table (0 = the root program:
+                  Yakuza's MAIN.BIN). Versions 1-2 (documented): word5 is the
+                  static-init pointer, word6 the bss size (R5 on; "unused" in
+                  R4), word7 an unused entry point. Version 3 (measured on 54 SH2
+                  overlays and Yakuza): the header is part of the image, file
+                  size == 0x40 + text + data in every sample, word5 is the bss
+                  size, and words 6-7 hold two addresses at or after the end of
+                  the file (equal on every C overlay; 0xa8 apart on Yakuza, a
+                  C++ title): the static-init table bounds by the R5 generator's
+                  construction, reported raw. docs/CODEWARRIOR.md has the record
+                  and the census.
   ELF             passthrough: PT_LOAD segments flattened into one image whose
                   base is the lowest segment address (EE SLUS, XS1/XS3 .OVL
                   overlays, which are ELFs despite the extension).
@@ -148,19 +159,31 @@ def container_header(payload: bytes) -> dict:
                 first_nonzero_offset=f"{n * 4:#x}")
 
 
-# ------------------------------------------------------------------ MWo3
+# ------------------------------------------------------------------- MWo
 
 
-def mwo3_header(d: bytes):
-    if len(d) < MWO3_HEADER or d[:4] != b"MWo3":
+def mwo_header(d: bytes):
+    """Metrowerks' overlay record: `MWo` + version digit, seven words, a 32-byte name.
+    Field names follow the struct in CodeWarrior for PlayStation's Targeting manual
+    (R4 listing 7.1, R5 listing 8.2 and the R5 release note that named bssSize)."""
+    if len(d) < MWO3_HEADER or d[:3] != b"MWo" or not (0x31 <= d[3] <= 0x39):
         return None
-    a, load, text, data, bss, p, q = struct.unpack_from(E + "7I", d, 4)
+    version = d[3] - 0x30
+    oid, load, text, data, w5, w6, w7 = struct.unpack_from(E + "7I", d, 4)
     name = d[0x20:0x40].split(b"\0", 1)[0].decode("latin1")
-    return dict(word1=a, load_addr=load, text_size=text, data_size=data, bss_size=bss,
-                word6=p, word7=q, name=name)
+    h = dict(version=version, overlay_id=oid, load_addr=load, text_size=text, data_size=data, name=name,
+             word5=w5, word6=w6, word7=w7)
+    if version >= 3:                    # measured layout (docs/CODEWARRIOR.md): bss size moved up one slot
+        h.update(bss_size=w5, static_init=None)
+    else:                               # documented layout: StaticInit, bssSize (R5; "unused" in R4), entryPoint
+        h.update(bss_size=w6, static_init=w5)
+    return h
 
 
-def describe_mwo3(d: bytes, h: dict) -> dict:
+mwo3_header = mwo_header            # the name the first release used
+
+
+def describe_mwo(d: bytes, h: dict) -> dict:
     expected = MWO3_HEADER + h["text_size"] + h["data_size"]
     base = h["load_addr"]
     segs = [dict(name="header", va=base, off=0, size=MWO3_HEADER),
@@ -168,12 +191,30 @@ def describe_mwo3(d: bytes, h: dict) -> dict:
             dict(name="data", va=base + MWO3_HEADER + h["text_size"], off=MWO3_HEADER + h["text_size"], size=h["data_size"]),
             dict(name="bss", va=base + expected, off=None, size=h["bss_size"])]
     notes = []
-    if len(d) != expected:
-        notes.append(f"file is {len(d):#x} bytes, header sizes add up to {expected:#x}")
-    if h["word6"] == h["word7"] == base + expected:
-        notes.append("word6 == word7 == load_addr + file size: the header is part of the image and .bss follows it")
-    return dict(kind="mwo3", name=h["name"], base=base, header=dict(word1=h["word1"], word6=f"{h['word6']:#x}", word7=f"{h['word7']:#x}"),
-                segments=[dict(s, va=f"{s['va']:#x}") for s in segs], complete=len(d) == expected, notes=notes)
+    if h["version"] >= 3:
+        if len(d) != expected:
+            notes.append(f"file is {len(d):#x} bytes, header sizes add up to {expected:#x}")
+        if h["word6"] == h["word7"] == base + expected:
+            notes.append("word6 == word7 == load_addr + file size: the header is part of the image and .bss follows it "
+                         "(a C overlay: the static-init table is empty)")
+        elif h["word7"] >= h["word6"] >= base + expected:
+            notes.append(f"word6..word7 span {h['word7'] - h['word6']:#x} bytes after the image: "
+                         "the static-init table bounds by the R5 generator's construction (unproven on PS2)")
+        complete = len(d) == expected
+    else:
+        if len(d) < expected:
+            notes.append(f"file is {len(d):#x} bytes, header sizes add up to {expected:#x}")
+        if h["static_init"]:
+            notes.append(f"StaticInit {h['static_init']:#x}: a routine to call before anything else (C++ overlay)")
+        complete = len(d) >= expected
+    header = dict(version=h["version"], overlay_id=h["overlay_id"], word6=f"{h['word6']:#x}", word7=f"{h['word7']:#x}")
+    if h["static_init"] is not None:
+        header["static_init"] = f"{h['static_init']:#x}"
+    return dict(kind=f"mwo{h['version']}", name=h["name"], base=base, header=header,
+                segments=[dict(s, va=f"{s['va']:#x}") for s in segs], complete=complete, notes=notes)
+
+
+describe_mwo3 = describe_mwo
 
 
 # ---------------------------------------------------------------- driver
@@ -182,9 +223,9 @@ def describe_mwo3(d: bytes, h: dict) -> dict:
 def describe(path: Path, data: bytes, base_override=None) -> tuple:
     """(sidecar dict, image bytes). The sidecar never carries machine paths."""
     rec = dict(input=path.name, input_size=len(data), input_sha256=sha256(data))
-    h = mwo3_header(data)
+    h = mwo_header(data)
     if h:
-        rec.update(describe_mwo3(data, h))
+        rec.update(describe_mwo(data, h))
         return rec, data
     eh = elf_header(data)
     if eh:
@@ -225,10 +266,23 @@ def self_test() -> int:
     hdr += b"gx_test".ljust(32, b"\0")
     rec, img = describe(Path("t.bin"), hdr + text + data)
     checks["mwo3"] = (rec["kind"] == "mwo3" and rec["name"] == "gx_test" and rec["base"] == load and rec["complete"]
-                      and rec["segments"][3]["va"] == f"{load + size:#x}" and img == hdr + text + data
+                      and rec["segments"][3]["va"] == f"{load + size:#x}" and rec["segments"][3]["size"] == 0xE00
+                      and rec["header"]["overlay_id"] == 8 and rec["header"]["version"] == 3 and img == hdr + text + data
                       and any("part of the image" in n for n in rec["notes"]))
     rec, _ = describe(Path("t.bin"), (hdr + text + data)[:-4])
     checks["mwo3-truncated"] = rec["kind"] == "mwo3" and not rec["complete"]
+    # Yakuza's MAIN.BIN header values (root overlay, id 0; words 6-7 0xa8 apart beyond the image)
+    hdr_y = b"MWo3" + struct.pack(E + "7I", 0, 0x100000, 0x2E0D20, 0x147420, 0x9B500, 0x58FD00, 0x58FDA8) + b"main.bin".ljust(32, b"\0")
+    rec, _ = describe(Path("MAIN.BIN"), hdr_y + b"\0" * 64)
+    checks["mwo3-root"] = rec["header"]["overlay_id"] == 0 and rec["segments"][3]["size"] == 0x9B500 \
+        and any("static-init table" in n for n in rec["notes"]) and not rec["complete"]
+    # the MWo1 record CodeWarrior for PlayStation R4 wrote for its OverlayDemo (Overlay1.bin, 1998):
+    # id 1, load 0x80030000, text 0x24 (foo1), no data, StaticInit 0, name "Overlay1.bin"
+    hdr1 = b"MWo1" + struct.pack(E + "7I", 1, 0x80030000, 0x24, 0, 0, 0, 0) + b"Overlay1.bin".ljust(32, b"\0")
+    rec, img = describe(Path("Overlay1.bin"), hdr1 + b"\x27\xbd\xff\xf8" + b"\0" * 36)
+    checks["mwo1"] = (rec["kind"] == "mwo1" and rec["header"]["version"] == 1 and rec["header"]["overlay_id"] == 1
+                      and rec["base"] == 0x80030000 and rec["segments"][1]["size"] == 0x24 and rec["segments"][3]["size"] == 0
+                      and rec["header"]["static_init"] == "0x0" and rec["complete"])
 
     # a zlib-stub ELF: one PT_LOAD at 0x800000 holding [len][zlib(payload)] then stub code
     payload = struct.pack(E + "I", 0x4182_2CCD) + b"\0" * 60 + bytes(range(256)) * 4
@@ -290,7 +344,7 @@ def main() -> int:
     rc = 0
     if rec["kind"] == "zlib-stub-elf" and not rec["length_ok"]:
         rc = 1
-    if rec["kind"] == "mwo3" and not rec["complete"]:
+    if rec["kind"].startswith("mwo") and not rec["complete"]:
         rc = 1
     if args.out:
         args.out.mkdir(parents=True, exist_ok=True)

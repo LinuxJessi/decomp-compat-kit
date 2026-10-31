@@ -29,6 +29,12 @@ Two corrections this corpus forced on the earlier heuristics:
   same way. Silent Hill 2 would have been filed as a Western ProDG title by the
   census alone; its `.comment` says CodeWarrior. The census corroborates a
   vendor string, it never replaces one.
+- **The entry point names Metrowerks when the `.comment` is gone.** Yakuza's
+  loader zeroes every register with `padduw` before Sony's SetupThread /
+  SetupHeap sequence, the habit of CodeWarrior for PlayStation's `_psstart.c`;
+  Silent Hill 2 starts at the `.bss` clear, i.e. Sony's `crt0`, so the Sony
+  shape never argues against CodeWarrior. The `MWo3` record and the compiler's
+  version lineage are read in `docs/CODEWARRIOR.md`.
 - **The toolchain is chosen per studio, not per region or publisher.** Konami's
   KCET (Silent Hill 2) used CodeWarrior while Kojima Productions (MGS3) used
   SCE's GCC; Sega's Yakuza team used CodeWarrior. "Japanese = ee-gcc" holds as a

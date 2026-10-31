@@ -8,9 +8,15 @@ heuristic corrections came out of that work and fix the order below:
      `.comment` survives stripping and settles the question on its own; GNU
      `GCC: (GNU)` / `GNU C` strings, `gcc2_compiled.` symbols and old-style
      C++ mangling (`name__Fii`) say GCC 2.x; Itanium `_Z` mangling says 3.x.
-  2. container tells: an `MWo3` header is CodeWarrior's linker overlay; a zlib
-     stub ELF hides the real image (see unwrap_image.py); an IOP module (ELF
-     type 0xff80, `.iopmod`) is R3000 code and none of the EE heuristics apply.
+  2. container tells: an `MWo` header (`MWo1`..`MWo3`) is the Metrowerks
+     linker's overlay record, the format CodeWarrior for PlayStation documents
+     and CodeWarrior for PS2 kept as version 3; a zlib stub ELF hides the real
+     image (see unwrap_image.py); an IOP module (ELF type 0xff80, `.iopmod`)
+     is R3000 code and none of the EE heuristics apply. The entry point is a
+     tell too: Metrowerks' PS2 startup zeroes every register with `padduw`
+     before the SetupThread/SetupHeap syscalls (Yakuza), the shape CodeWarrior
+     for PlayStation's `_psstart.c` had; a game can also link Sony's crt0
+     (Silent Hill 2 does), so the SCE shape never argues against CodeWarrior.
   3. the prologue census: `addiu $sp,$sp,-N` followed by callee saves. SCE
      ee-gcc saves with `sd` at an 8-byte stride; SN ProDG *and* Metrowerks
      CodeWarrior both save with `sq` at a 16-byte stride, so `sq` alone never
@@ -100,11 +106,71 @@ def read_elf(d: bytes):
 
 
 def mwo3_header(d: bytes):
-    if len(d) < 0x40 or d[:4] != b"MWo3":
+    """Metrowerks' overlay record, any version (field layout: unwrap_image.py, docs/CODEWARRIOR.md)."""
+    if len(d) < 0x40 or d[:3] != b"MWo" or not (0x31 <= d[3] <= 0x39):
         return None
-    a, load, text, data, bss, p, q = struct.unpack_from(E + "7I", d, 4)
-    return dict(word1=a, load_addr=load, text_size=text, data_size=data, bss_size=bss, word6=p, word7=q,
+    version = d[3] - 0x30
+    oid, load, text, data, w5, w6, w7 = struct.unpack_from(E + "7I", d, 4)
+    return dict(version=version, overlay_id=oid, load_addr=load, text_size=text, data_size=data,
+                bss_size=w5 if version >= 3 else w6, static_init=None if version >= 3 else w5, word6=w6, word7=w7,
                 name=d[0x20:0x40].split(b"\0", 1)[0].decode("latin1"))
+
+
+# The entry point of a PS2 executable: what the startup code looks like.
+PADDUW_ZERO = 0x70000428          # padduw rd,$zero,$zero with rd in bits 15..11
+SYSCALL = 0x0000000C
+LI_V1_SETUPTHREAD, LI_V1_SETUPHEAP = 0x2403003C, 0x2403003D
+
+
+def startup_shape(img) -> dict | None:
+    """Metrowerks' PS2 `_psstart` zeroes every GPR with padduw (then hi/lo, sa, every FPR) before
+    the SetupThread (0x3c) and SetupHeap (0x3d) syscalls; Sony's crt0 starts at the bss clear and
+    the same two syscalls. Measured on Yakuza's loader and Silent Hill 2 (docs/CODEWARRIOR.md)."""
+    if not img.elf:
+        return None
+    entry = img.elf["entry"]
+    for blob, va in img.code:
+        if va <= entry < va + len(blob):
+            off = entry - va
+            n = min(96, (len(blob) - off) // 4)
+            words = struct.unpack_from(E + f"{n}I", blob, off)
+            break
+    else:
+        return None
+    zeroed = 0
+    for w in words:
+        if (w & 0xFFFF07FF) == PADDUW_ZERO:
+            zeroed += 1
+        else:
+            break
+    sce = any(words[i] in (LI_V1_SETUPTHREAD, LI_V1_SETUPHEAP) and words[i + 1] == SYSCALL for i in range(n - 1))
+    if zeroed >= 16:
+        return dict(kind="metrowerks-psstart", registers_zeroed=zeroed, sce_syscalls=sce,
+                    note=f"entry zeroes {zeroed} registers with padduw before SetupThread/SetupHeap: the Metrowerks "
+                         "PS2 startup (CodeWarrior for PlayStation's _psstart.c zeroed every register the same way)")
+    if sce:
+        return dict(kind="sce-crt0", registers_zeroed=0, sce_syscalls=True,
+                    note="entry is Sony's crt0 shape (bss clear, SetupThread 0x3c, SetupHeap 0x3d): a startup tell, "
+                         "not a compiler tell; Silent Hill 2 links it under CodeWarrior")
+    return dict(kind="other", registers_zeroed=zeroed, sce_syscalls=False, note="entry matches neither known startup")
+
+
+# Metrowerks MIPS compiler versions, from the DLL version resources of CodeWarrior for
+# PlayStation R4/R5 and the .comment of the PS2 titles (docs/CODEWARRIOR.md).
+MW_LINEAGE = [("2.44", "CodeWarrior for PlayStation Release 4, April 1998 (cc_mips.dll 2.44.14; release notes call it 2.39)"),
+              ("2.1.", "CodeWarrior for PlayStation Release 5, May 1999 (cc_mips.dll 2.1.87, ln_mips.dll 2.1.93)"),
+              ("2.4.1", "CodeWarrior for PlayStation 2: the .comment of Silent Hill 2 (2001) and Yakuza (2006)")]
+
+
+def mw_lineage(text: str) -> str | None:
+    m = re.search(r"\((\d+(?:\.\d+)+)\)", text)
+    if not m:
+        return None
+    v = m.group(1)
+    for prefix, what in MW_LINEAGE:
+        if v.startswith(prefix):
+            return f"MW MIPS compiler {v}: {what}"
+    return f"MW MIPS compiler {v}: not in the kit's lineage table (R4 2.44.x, R5 2.1.x, PS2 2.4.1.01)"
 
 
 def is_zlib_stub(d: bytes, segs: list) -> bool:
@@ -135,7 +201,7 @@ class Image:
             base = sidecar["base"]
         h = mwo3_header(data)
         if h:
-            self.kind, self.mwo3 = "mwo3", h
+            self.kind, self.mwo3 = f"mwo{h['version']}", h
             text = data[0x40:0x40 + h["text_size"]]
             self.code.append((text, h["load_addr"] + 0x40))
             self.loaded.append((data, h["load_addr"]))
@@ -292,7 +358,7 @@ def census(img: Image) -> dict:
     return c
 
 
-def verdict(img: Image, s: dict, c: dict) -> dict:
+def verdict(img: Image, s: dict, c: dict, startup: dict | None = None) -> dict:
     reasons, footnotes = [], []
     if img.kind == "iop-module":
         return dict(compiler="IOP module (R3000, MIPS-I): EE heuristics skipped", confidence="n/a",
@@ -308,18 +374,26 @@ def verdict(img: Image, s: dict, c: dict) -> dict:
     minority = total - style.get(dominant, 0) if dominant else 0
     if "metrowerks" in families:
         name, conf = "Metrowerks CodeWarrior for PS2 (MWCC)", "high"
-        reasons.append("vendor string: " + next(v["text"] for v in s["vendor"] if v["family"] == "metrowerks"))
+        text = next(v["text"] for v in s["vendor"] if v["family"] == "metrowerks")
+        reasons.append("vendor string: " + text)
+        if (lineage := mw_lineage(text)):
+            footnotes.append(lineage)
         if dominant == "sq":
             reasons.append(f"corroborated by the census: sq/16-byte saves dominate ({style.get('sq')} of {total})")
+        if startup and startup["kind"] == "metrowerks-psstart":
+            reasons.append(startup["note"])
     elif "sn" in families:
         name, conf = "SN Systems ProDG", "high"
         reasons.append("vendor string: " + next(v["text"] for v in s["vendor"] if v["family"] == "sn"))
     elif dominant == "sq":
         name, conf = "sq/16-byte saves: SN ProDG or Metrowerks CodeWarrior (census cannot separate them)", "medium"
         reasons.append(f"sq saves dominate ({style.get('sq')} of {total} prologues); no vendor string found")
-        if img.kind == "mwo3":
+        if img.kind.startswith("mwo"):
             name, conf = "Metrowerks CodeWarrior for PS2 (MWCC)", "high"
-            reasons.append("MWo3 container: CodeWarrior's linker overlay")
+            reasons.append(f"{img.kind.upper().replace('MWO', 'MWo')} container: the Metrowerks linker's overlay record")
+        elif startup and startup["kind"] == "metrowerks-psstart":
+            name, conf = "Metrowerks CodeWarrior for PS2 (MWCC)", "medium"
+            reasons.append(startup["note"])
     elif dominant == "sd":
         gcc3 = s["mangling"]["itanium"] > s["mangling"]["old_gnu"] and s["mangling"]["itanium"] > 2
         pool = c["float_pool_loads"] > 4 * max(1, c["float_immediates"])
@@ -362,6 +436,8 @@ def verdict(img: Image, s: dict, c: dict) -> dict:
         if name_ in img.sections:
             reasons.append(f"{name_} section: Sony DVP/EE toolchain output")
             break
+    if startup and startup["kind"] == "sce-crt0" and "metrowerks" in families:
+        footnotes.append(startup["note"])
     return dict(compiler=name, confidence=conf, reasons=reasons, footnotes=footnotes)
 
 
@@ -370,17 +446,21 @@ def fingerprint(path_name: str, data: bytes, base=None, sidecar=None) -> dict:
     s = strings_evidence(img)
     c = census(img)
     funcs = sum(1 for _n, _v, _s, t in img.symbols if t == STT_FUNC)
+    startup = startup_shape(img)
     rec = dict(input=path_name, size=len(data), kind=img.kind,
-               stripped=(img.kind != "mwo3" and not img.symbols) if img.elf or img.kind == "raw" else None,
+               stripped=(not img.kind.startswith("mwo") and not img.symbols) if img.elf or img.kind == "raw" else None,
                func_symbols=funcs, sections=img.sections, notes=img.notes, strings=s, census=c)
+    if startup:
+        rec["startup"] = startup
     if img.mwo3:
-        rec["mwo3"] = dict(name=img.mwo3["name"], load_addr=f"{img.mwo3['load_addr']:#x}",
+        rec["mwo3"] = dict(name=img.mwo3["name"], version=img.mwo3["version"], overlay_id=img.mwo3["overlay_id"],
+                           load_addr=f"{img.mwo3['load_addr']:#x}",
                            text=img.mwo3["text_size"], data=img.mwo3["data_size"], bss=img.mwo3["bss_size"])
     if img.elf:
         rec["elf"] = dict(type=f"{img.elf['type']:#x}", flags=f"{img.elf['flags']:#x}", entry=f"{img.elf['entry']:#x}",
                           segments=[dict(va=f"{x['va']:#x}", filesz=f"{x['filesz']:#x}", memsz=f"{x['memsz']:#x}",
                                          flags=x["flags"]) for x in img.elf["segments"]])
-    rec["verdict"] = verdict(img, s, c)
+    rec["verdict"] = verdict(img, s, c, startup)
     return rec
 
 
@@ -393,7 +473,10 @@ def report(rec: dict, verbose=False) -> str:
     lines += [f"    note: {f}" for f in v["footnotes"]]
     if rec.get("mwo3"):
         m = rec["mwo3"]
-        lines.append(f"  MWo3 '{m['name']}' at {m['load_addr']}: text {m['text']:#x} data {m['data']:#x} bss {m['bss']:#x}")
+        lines.append(f"  MWo{m['version']} '{m['name']}' id {m['overlay_id']} at {m['load_addr']}: "
+                     f"text {m['text']:#x} data {m['data']:#x} bss {m['bss']:#x}")
+    if rec.get("startup") and rec["startup"]["kind"] != "other":
+        lines.append(f"  startup: {rec['startup']['kind']} ({rec['startup']['registers_zeroed']} registers zeroed at the entry)")
     if c["prologues"]:
         lines.append(f"  census: {c['prologues']} prologues {c['save_style']}  strides {c['stride']}")
         lines.append(f"          sd(sp) {c['sd_sp']}  sq(sp) {c['sq_sp']}  sw(sp) {c['sw_sp']}  lq/sq {c['lq']}/{c['sq']}  "
@@ -484,6 +567,19 @@ def self_test() -> int:
         and "MW MIPS C Compiler (2.4.1.01)" in r["strings"]["comment"] and r["stripped"]
     r = fingerprint("sq-only", build_elf(SQ_PROLOGUE * 3))
     checks["sq-ambiguous"] = "ProDG or Metrowerks" in r["verdict"]["compiler"]
+    checks["lineage"] = any("Release 4" in f for f in fingerprint("mw", build_elf(SQ_PROLOGUE, comment=b"MW MIPS C Compiler (2.44.14)\0"))["verdict"]["footnotes"]) \
+        and any("PlayStation 2" in f for f in fingerprint("mw", mw)["verdict"]["footnotes"])
+    # the Metrowerks PS2 startup: 31 padduw rd,$zero,$zero at the entry, then the SetupThread/SetupHeap
+    # syscalls; no .comment, so only the startup names the vendor
+    mw_start = asm(0, 0) + asm(*[PADDUW_ZERO | (rd << 11) for rd in range(1, 32)]) \
+        + asm(0x3C020015, 0x24426300, LI_V1_SETUPTHREAD, SYSCALL, LI_V1_SETUPHEAP, SYSCALL)
+    r = fingerprint("yak", build_elf(mw_start + SQ_PROLOGUE * 3))
+    checks["mw-startup"] = r["startup"]["kind"] == "metrowerks-psstart" and r["startup"]["registers_zeroed"] == 31 \
+        and r["verdict"]["compiler"].startswith("Metrowerks") and r["verdict"]["confidence"] == "medium"
+    sce_start = asm(0, 0, 0x3C02003E, 0x24426880, 0x7C400000, LI_V1_SETUPTHREAD, SYSCALL, LI_V1_SETUPHEAP, SYSCALL)
+    r = fingerprint("sh2", build_elf(sce_start + SQ_PROLOGUE * 3, comment=b"MW MIPS C Compiler (2.4.1.01)\0"))
+    checks["sce-startup"] = r["startup"]["kind"] == "sce-crt0" and r["verdict"]["compiler"].startswith("Metrowerks") \
+        and any("not a compiler tell" in f for f in r["verdict"]["footnotes"])
     syms = [("gcc2_compiled.", 0x100000, 0), ("main", 0x100000, 48), ("rotX__FFZ", 0x100030, 48)]
     gnu = build_elf(SD_PROLOGUE * 4 + SQ_PROLOGUE, symbols=syms, extra_sections=(".vutext",))
     r = fingerprint("gnu", gnu)
@@ -502,7 +598,11 @@ def self_test() -> int:
     checks["iop"] = fingerprint("irx", build_elf(SD_PROLOGUE, e_type=0xFF80))["verdict"]["compiler"].startswith("IOP module")
     hdr = b"MWo3" + struct.pack(E + "7I", 8, 0x01F0BC00, len(SQ_PROLOGUE) * 2, 16, 0, 0, 0) + b"gx_t".ljust(32, b"\0")
     r = fingerprint("ovl.bin", hdr + SQ_PROLOGUE * 2 + b"\x11" * 16)
-    checks["mwo3"] = r["kind"] == "mwo3" and r["verdict"]["compiler"].startswith("Metrowerks") and r["mwo3"]["name"] == "gx_t"
+    checks["mwo3"] = r["kind"] == "mwo3" and r["verdict"]["compiler"].startswith("Metrowerks") and r["mwo3"]["name"] == "gx_t" \
+        and r["mwo3"]["overlay_id"] == 8 and r["mwo3"]["bss"] == 0 and any("MWo3 container" in x for x in r["verdict"]["reasons"])
+    hdr1 = b"MWo1" + struct.pack(E + "7I", 1, 0x80030000, len(SQ_PROLOGUE), 0, 0, 0x30, 0) + b"Overlay1.bin".ljust(32, b"\0")
+    r = fingerprint("Overlay1.bin", hdr1 + SQ_PROLOGUE)
+    checks["mwo1"] = r["kind"] == "mwo1" and r["mwo3"]["version"] == 1 and r["mwo3"]["bss"] == 0x30 and r["mwo3"]["overlay_id"] == 1
     payload = zlib.compress(b"\0" * 64)
     stub = build_elf(struct.pack(E + "I", 64) + payload)
     checks["stub"] = fingerprint("stub", stub)["kind"] == "zlib-stub-elf"

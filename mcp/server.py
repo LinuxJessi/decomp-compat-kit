@@ -26,12 +26,17 @@ never come from the model):
 Run:  .venv/bin/python mcp/server.py            (stdio)
       claude mcp add ps2decomp -e DECOMP_UPSTREAM=... -- .venv/bin/python mcp/server.py
 
+doctor also reports the configured original's compiler family (fingerprint_elf.py): the kit compiles
+with ee-gcc only, so on a Metrowerks CodeWarrior or SN ProDG original match_init refuses functions
+with sq-saving prologues up front and every verify carries a warning (docs/CODEWARRIOR.md).
+
 Tools, by pipeline stage: doctor | identify_fingerprint, identify_unwrap |
 name_lookup, name_transfer_symbols | triage_function, triage_unit |
 probe_toolchain_start | verify_tu, verify_unit_start | job_status |
 match_init, match_card, match_disasm, match_source, match_write_function,
 match_edit, match_check, match_verdict, match_best, match_patch, match_list.
-Resources: kit://docs/{name}, kit://sandbox/{function}/card, kit://sandbox/{function}/budget.
+Resources: kit://docs/{playbook|toolchain-differences|corpus|codewarrior|readme},
+kit://sandbox/{function}/card, kit://sandbox/{function}/budget.
 Prompt: match_one_function.
 
 Long-running work (a whole-unit verification, the toolchain probe) returns a job
@@ -72,7 +77,7 @@ SYMBOLS = KIT / "symbols" / "symbols.csv"
 DOCKER_IMAGE = os.environ.get("DECOMP_IMAGE", "debian:bookworm-slim")   # verify_decomp.py --image: passed to every verify run and to the probe
 TEXT_LIMIT = 12000            # characters of tool stdout returned before truncation
 DOCS = {"playbook": "MATCHING-PLAYBOOK.md", "toolchain-differences": "TOOLCHAIN-DIFFERENCES.md",
-        "corpus": "CORPUS.md", "readme": "../README.md"}
+        "corpus": "CORPUS.md", "codewarrior": "CODEWARRIOR.md", "readme": "../README.md"}
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False)
 LOCAL_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
@@ -86,7 +91,9 @@ server = MCPServer(
         "function) -> match_card / match_disasm (evidence) -> match_write_function (your C) -> "
         "match_check with one changed hypothesis per call -> repeat until MATCH, a NO PROGRESS or "
         "ceiling stop, or an UNVERIFIABLE stop -> match_verdict -> match_patch. The tool decides "
-        "exactness; never claim a match the check did not print. Read kit://docs/playbook once."),
+        "exactness; never claim a match the check did not print. Read kit://docs/playbook once. The kit "
+        "compiles with SCE ee-gcc only: on a CodeWarrior or ProDG original (doctor reports the family) only the "
+        "ee-gcc minority can match, and match_init refuses sq-prologue functions; kit://docs/codewarrior says why."),
 )
 
 
@@ -124,6 +131,61 @@ def parse_json_tail(text: str):
         return json.loads(text)
     except ValueError:
         return None
+
+
+# ------------------------------------------------------- compiler family of the original
+
+_FAMILY_CACHE: dict[str, dict] = {}
+NOT_EE_GCC = ("metrowerks", "sn", "ambiguous")
+
+
+def binary_family(path: Path | None = None) -> dict[str, Any]:
+    """Which compiler family the configured original fingerprints as, cached per file identity.
+    The kit's compilers are ee-gcc; a Metrowerks or ProDG original (docs/CODEWARRIOR.md) bounds
+    what any match or verify here can prove."""
+    p = path or (GAME / BINARY)
+    try:
+        st = p.stat()
+    except OSError:
+        return dict(family="unknown", compiler=None, confidence=None, startup=None, reason=f"{p} is not readable")
+    key = f"{p}:{st.st_size}:{int(st.st_mtime)}"
+    if key not in _FAMILY_CACHE:
+        r = run("fingerprint_elf.py", [str(p), "--json"], timeout=300)
+        rep = parse_json_tail(r["stdout"]) or {}
+        v = rep.get("verdict") or {}
+        comp = v.get("compiler") or ""
+        family = ("metrowerks" if comp.startswith("Metrowerks") else "sn" if comp.startswith("SN")
+                  else "ambiguous" if "ProDG or Metrowerks" in comp else "ee-gcc" if "ee-gcc" in comp else "unknown")
+        _FAMILY_CACHE[key] = dict(family=family, compiler=comp or None, confidence=v.get("confidence"),
+                                  startup=(rep.get("startup") or {}).get("kind"))
+    return _FAMILY_CACHE[key]
+
+
+def family_warning(fam: dict) -> str | None:
+    if fam.get("family") in NOT_EE_GCC:
+        return (f"{BINARY} fingerprints as {fam['compiler']} [{fam['confidence']}]. This kit compiles with SCE ee-gcc "
+                "only, so a byte-match is possible for the ee-gcc minority alone (Sony SDK and middleware objects, "
+                "sd-saving prologues); a function whose prologue saves with sq at a 16-byte stride is CodeWarrior/"
+                "ProDG code that no form can reproduce here. Read kit://docs/codewarrior.")
+    return None
+
+
+SAVE_RE = re.compile(r"^\s*(?:[0-9a-f]{8}:\s+[0-9a-f]{8}\s+)?(sq|sd|sw)\s+\$\w+,\s*-?0x[0-9A-Fa-f]+\(\$sp\)")
+
+
+def prologue_style(function: str) -> dict[str, Any]:
+    """The save style of the original's prologue (sq / sd / sw against $sp in its first 24
+    instructions), from match_kit's disassembly; needs no sandbox."""
+    r = run("match_kit.py", ["disasm", function, "--range", "0:96", "--brief"], timeout=300)
+    if r["rc"]:
+        return dict(style=None, counts={}, error=r["stderr"][-300:] or r["stdout"][-300:])
+    counts: dict[str, int] = {}
+    for line in r["stdout"].splitlines():
+        m = SAVE_RE.match(line)
+        if m:
+            counts[m.group(1)] = counts.get(m.group(1), 0) + 1
+    style = max(counts, key=counts.get) if counts else None
+    return dict(style=style, counts=counts)
 
 
 def sandbox_path(function_or_path: str) -> Path:
@@ -259,6 +321,11 @@ def doctor() -> dict[str, Any]:
                                               "by a few words on functions the newer patches change")
         except Exception as e:
             checks["contract"] = dict(error=str(e)[-200:])
+    if checks["game_dir"]["ok"]:
+        fam = binary_family()
+        checks["binary_compiler"] = dict(ok=True, **fam)
+        if (w := family_warning(fam)):
+            checks["binary_compiler"]["note"] = w
     try:
         d = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"], capture_output=True, text=True, timeout=20)
         checks["docker"] = dict(ok=d.returncode == 0, version=d.stdout.strip() or d.stderr.strip()[-200:])
@@ -534,6 +601,8 @@ def verify_unit_start(compiler: str = "stock", unit: str | None = None, baseline
     meta_path = JOBS_DIR / f"{job['job_id']}.json"
     meta = json.loads(meta_path.read_text()); meta["report"] = str(report); meta_path.write_text(json.dumps(meta))
     job["report"] = str(report)
+    if (w := family_warning(binary_family())):
+        job["warning"] = w
     return job
 
 
@@ -559,8 +628,11 @@ def verify_tu(tu: str, compiler: str = "stock") -> dict[str, Any]:
             rep = json.loads(report.read_text())
         except ValueError:
             rep = None
-    return dict(rc=r["rc"], text=r["stdout"], stderr=r["stderr"],
-                per_tu=(rep or {}).get("per_tu"), mismatches=(rep or {}).get("mismatches"), warnings=(rep or {}).get("warnings"))
+    out = dict(rc=r["rc"], text=r["stdout"], stderr=r["stderr"],
+               per_tu=(rep or {}).get("per_tu"), mismatches=(rep or {}).get("mismatches"), warnings=(rep or {}).get("warnings"))
+    if (w := family_warning(binary_family())):
+        out["warning"] = w
+    return out
 
 
 @server.tool(annotations=LOCAL_WRITE, description="Start the toolchain behaviour probe in the background (about a "
@@ -603,6 +675,15 @@ def match_init(function: str, forms: int = 30, compiler: str | None = None, auth
     effective = compiler or match_kit_module().default_compiler()
     if effective == "contract" and (why := contract_blocker()):
         return dict(error=why, hint="pass compiler='stock' to match against the stock rootfs pair instead")
+    fam = binary_family()
+    warning = family_warning(fam)
+    if warning:
+        pro = prologue_style(function)
+        if pro["style"] == "sq":
+            return dict(refused=True, rc=3, compiler_family=fam, prologue=pro,
+                        stopped="init refused: the original saves with sq (CodeWarrior/ProDG prologue) in a binary that "
+                                "fingerprints as " + fam["family"] + "; no ee-gcc form can match it, so no sandbox was opened",
+                        reasons=[warning])
     if compiler:
         args += ["--compiler", compiler]
     if author:
@@ -614,6 +695,9 @@ def match_init(function: str, forms: int = 30, compiler: str | None = None, auth
     data.update(rc=r["rc"], stderr=r["stderr"][-1500:] if r["rc"] else "")
     if r["rc"] == 3:
         data.setdefault("stopped", "init refused: see `refused` and `reasons`; more C cannot change this")
+    if warning:
+        data["compiler_family"] = fam
+        data["warning"] = warning
     return data
 
 
@@ -821,7 +905,7 @@ def match_list() -> dict[str, Any]:
 # ---------------------------------------------------------------- resources and prompt
 
 @server.resource("kit://docs/{name}", name="kit docs", mime_type="text/markdown",
-                 description="Kit documents: playbook, toolchain-differences, corpus, readme")
+                 description="Kit documents: playbook, toolchain-differences, corpus, codewarrior, readme")
 def doc_resource(name: str) -> str:
     rel = DOCS.get(name)
     if not rel:

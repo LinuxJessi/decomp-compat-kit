@@ -48,7 +48,7 @@ the model never chooses them (the 2026-07-28 revision deprecates roots).
 | verify | `verify_tu`, `verify_unit_start` (job), `job_status` |
 | match | `match_init`, `match_card`, `match_disasm`, `match_source`, `match_write_function`, `match_edit`, `match_check`, `match_verdict`, `match_best`, `match_patch`, `match_list` |
 
-Resources: `kit://docs/{playbook|toolchain-differences|corpus|readme}`,
+Resources: `kit://docs/{playbook|toolchain-differences|corpus|codewarrior|readme}`,
 `kit://sandbox/{function}/card`, `kit://sandbox/{function}/budget`.
 Prompt: `match_one_function(function, ceiling)`, the stock-lane worker brief.
 
@@ -59,6 +59,19 @@ up front when the original refers to something the verifier cannot name) ->
 externs and typedefs, `match_edit` for a TU-local header field) -> `match_check`
 with one changed hypothesis per call -> repeat until MATCH or a stop ->
 `match_verdict` and `match_patch`.
+
+## The compiler-family gate (2026-10-31)
+
+The kit compiles with SCE ee-gcc only. `doctor` now fingerprints the configured
+original once (`binary_compiler`: family, verdict, startup shape) and, when it
+is Metrowerks CodeWarrior or SN ProDG (or the census cannot tell them apart),
+`match_init` reads the function's prologue through `match_kit.py disasm` before
+opening anything: an `sq`-saving prologue is refused with `rc 3` and the reason,
+because no ee-gcc form can reproduce it; an `sd`-saving one (the Sony SDK and
+middleware minority) opens with a `warning` and the `compiler_family` attached.
+`verify_tu` and `verify_unit_start` carry the same warning. The evidence behind
+the rule, read from the CodeWarrior for PlayStation R4/R5 discs and measured on
+Silent Hill 2 and Yakuza, is `kit://docs/codewarrior`.
 
 ## First run (2026-10-30)
 

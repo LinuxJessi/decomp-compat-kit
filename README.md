@@ -78,7 +78,7 @@ functions are cheap. The tools in the first half of the table are for that.
 | Path | | Measured on |
 |---|---|---|
 | `tools/fingerprint_elf.py` | which compiler built a PS2 code image, with evidence in the order that avoids the known misreads: vendor strings, container tells, prologue census, idioms, SDK banners | 9 binaries from 6 games, `docs/CORPUS.md` |
-| `tools/unwrap_image.py` | code images that are not a plain ELF: a zlib-stub boot ELF (MGS3) inflated and its container header described, a Metrowerks `MWo3` overlay (Silent Hill 2, Yakuza) parsed, a plain ELF flattened; emits `.image` + JSON sidecar | MGS3 round-trips byte-identical to an independent unpack |
+| `tools/unwrap_image.py` | code images that are not a plain ELF: a zlib-stub boot ELF (MGS3) inflated and its container header described, a Metrowerks `MWo1`..`MWo3` overlay record (Silent Hill 2, Yakuza, the CodeWarrior demo) parsed with the fields the Metrowerks manuals name, a plain ELF flattened; emits `.image` + JSON sidecar | MGS3 round-trips byte-identical to an independent unpack; 55 PS2 overlay records agree with the layout |
 | `tools/dump_symbols.py` | ELF symtab → CSV, for all binaries of a target at once | Xenosaga I: 15,132 symbols from six unstripped binaries |
 | `tools/transfer_symbols.py` | name a stripped binary's functions from an unstripped donor of the same compiler era by masked body matching | Xenosaga I → III: reproduces all 428 known matches; Xenosaga I → FFX: 196 SDK/CRT functions |
 | `tools/symbols_to_splat.py` | symbol-table CSV → the `name = 0xVA; // type:func size:0xN` format splat ingests | cross-checked against an independent symbol file: 5,927 names, 0 disagreements |
@@ -91,6 +91,7 @@ functions are cheap. The tools in the first half of the table are for that.
 | `docs/CORPUS.md` | the six-game fingerprint table and the two heuristic corrections it forced | |
 | `docs/TOOLCHAIN-DIFFERENCES.md` | the catalogue: every compiler and assembler behaviour the Xenosaga I project found between the archived ee-gcc 2.96 and the retail build, how each shows up in a diff, and what the probe measured | |
 | `docs/MATCHING-PLAYBOOK.md` | the loop discipline, the evidence card, forty-odd GCC 2.96 codegen idioms each tied to the function that proved it, review and cost lessons | |
+| `docs/CODEWARRIOR.md` | what CodeWarrior for PlayStation R4/R5 (the preserved PS1 product, read from the discs) documents about the Metrowerks MIPS toolchain the PS2 titles used: the `MWo` overlay record by version, the linker's symbols and command-file language, the startup code and its tell, the compiler's pragmas and `__declspec`s, the version lineage, and why the kit still has no CodeWarrior lane | the record measured on all 54 Silent Hill 2 overlays and Yakuza's `MAIN.BIN`; the startup on both executables |
 
 ## Identify: `fingerprint_elf.py`, `unwrap_image.py`
 
@@ -104,11 +105,15 @@ tools/fingerprint_elf.py IOP/SSD.IRX                      # an IOP module: says 
 
 The order matters and was learned the hard way: **vendor strings first**
 (`.comment` survives stripping and names Metrowerks outright), then container
-tells (`MWo3`, a zlib stub, ELF type `0xff80`), then the prologue census, then
-idioms, then `PsIIlib` SDK banners. The census alone misfiles CodeWarrior as SN
-ProDG (both save with `sq` at a 16-byte stride), and a minority save style is
-present in every binary because the Sony SDK libraries are ee-gcc objects
-whatever built the game. Two findings came out of running it across the shelf:
+tells (`MWo`, a zlib stub, ELF type `0xff80`), then the entry point (a run of
+`padduw rd,$zero,$zero` is Metrowerks' PS2 startup, the shape of CodeWarrior
+for PlayStation's `_psstart.c`; Sony's `crt0` shape proves nothing, Silent Hill
+2 links it under CodeWarrior), then the prologue census, then idioms, then
+`PsIIlib` SDK banners. The census alone misfiles CodeWarrior as SN ProDG (both
+save with `sq` at a 16-byte stride), and a minority save style is present in
+every binary because the Sony SDK libraries are ee-gcc objects whatever built
+the game. `docs/CODEWARRIOR.md` is where the Metrowerks side of this comes
+from. Two findings came out of running it across the shelf:
 MGS3 fingerprints as ee-gcc **3.x** (float constants loaded from `.rodata`),
 not the 2.9x its first pass assumed, and FFX saves `sd` at a 16-byte stride,
 the signature of the 1999 `2.9-991111` build. Both are leads for a matching
@@ -407,8 +412,11 @@ evidence; byte identity is necessary, not sufficient.
 and the `match_*` loop with `match_write_function` as the only edit a client
 needs; the playbook and catalogue are resources and the worker brief is a
 prompt. Every tool shells out to the scripts in `tools/`, so the server cannot
-give a verdict the command line would not. Install and registration are in
-[`mcp/README.md`](mcp/README.md).
+give a verdict the command line would not. `doctor` reports the configured
+original's compiler family, and because the kit compiles with ee-gcc only,
+`match_init` refuses an `sq`-prologue function of a CodeWarrior or ProDG
+original before any budget is spent (`docs/CODEWARRIOR.md`). Install and
+registration are in [`mcp/README.md`](mcp/README.md).
 
 ## Data-format knowledge is a decomp input
 

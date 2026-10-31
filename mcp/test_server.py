@@ -200,5 +200,99 @@ class LintTu(unittest.TestCase):
             self.assertIn("error", server.lint_tu("nope.c"))
 
 
+
+class CompilerFamily(unittest.TestCase):
+    """The CodeWarrior gate (docs/CODEWARRIOR.md): the family comes from fingerprint_elf.py's JSON,
+    the prologue style from match_kit disasm, and match_init refuses sq-prologue functions in a
+    Metrowerks/ProDG original without opening a sandbox."""
+
+    MW = json.dumps(dict(verdict=dict(compiler="Metrowerks CodeWarrior for PS2 (MWCC)", confidence="high"),
+                         startup=dict(kind="metrowerks-psstart")))
+    GCC = json.dumps(dict(verdict=dict(compiler="SCE ee-gcc 2.96 (Cygnus/SCE R5900 GCC, 2.9x family)", confidence="high")))
+    SQ_DIS = "# f @ 0x100000\naddiu       $sp, $sp, -0x40\nsq          $s0, 0x0($sp)\nsq          $s1, 0x10($sp)\nsq          $ra, 0x20($sp)\n"
+    SD_DIS = "# g @ 0x100000\naddiu       $sp, $sp, -0x20\nsd          $s0, 0x0($sp)\nsd          $ra, 0x8($sp)\nlq          $v0, 0x10($sp)\n"
+
+    def setUp(self):
+        server._FAMILY_CACHE.clear()
+        self.bin = Path(tempfile.mkdtemp(prefix="fam-")) / "SLUS_tst.00"
+        self.bin.write_bytes(b"\x7fELF" + b"\0" * 60)
+
+    def fake_run(self, outputs):
+        def run(tool, args, timeout=600):
+            key = tool if tool != "match_kit.py" else "match_kit.py " + args[0]
+            out = outputs.get(key, "")
+            return dict(rc=0 if out else 1, stdout=out, stderr="" if out else "no output", truncated=False, command=tool)
+        return run
+
+    def test_family_is_cached_per_file(self):
+        with mock.patch.object(server, "run", side_effect=self.fake_run({"fingerprint_elf.py": self.MW})) as run:
+            a = server.binary_family(self.bin)
+            b = server.binary_family(self.bin)
+        self.assertEqual(a["family"], "metrowerks")
+        self.assertEqual(a["startup"], "metrowerks-psstart")
+        self.assertIs(a, b)
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("ee-gcc only", server.family_warning(a))
+
+    def test_gcc_original_has_no_warning(self):
+        with mock.patch.object(server, "run", side_effect=self.fake_run({"fingerprint_elf.py": self.GCC})):
+            fam = server.binary_family(self.bin)
+        self.assertEqual(fam["family"], "ee-gcc")
+        self.assertIsNone(server.family_warning(fam))
+
+    def test_ambiguous_census_warns(self):
+        amb = json.dumps(dict(verdict=dict(compiler="sq/16-byte saves: SN ProDG or Metrowerks CodeWarrior (census cannot separate them)",
+                                           confidence="medium")))
+        with mock.patch.object(server, "run", side_effect=self.fake_run({"fingerprint_elf.py": amb})):
+            self.assertEqual(server.binary_family(self.bin)["family"], "ambiguous")
+
+    def test_prologue_style(self):
+        with mock.patch.object(server, "run", side_effect=self.fake_run({"match_kit.py disasm": self.SQ_DIS})):
+            self.assertEqual(server.prologue_style("f")["style"], "sq")
+        with mock.patch.object(server, "run", side_effect=self.fake_run({"match_kit.py disasm": self.SD_DIS})):
+            pro = server.prologue_style("g")
+        self.assertEqual(pro["style"], "sd")
+        self.assertEqual(pro["counts"], {"sd": 2})          # the lq is a load, not a save
+        with mock.patch.object(server, "run", side_effect=self.fake_run({})):
+            self.assertIsNone(server.prologue_style("h")["style"])
+
+    def test_match_init_refuses_sq_in_codewarrior_binary(self):
+        outputs = {"fingerprint_elf.py": self.MW, "match_kit.py disasm": self.SQ_DIS,
+                   "match_kit.py init": json.dumps(dict(sandbox="/nowhere"))}
+        with mock.patch.object(server, "GAME", self.bin.parent), mock.patch.object(server, "BINARY", self.bin.name), \
+             mock.patch.object(server, "run", side_effect=self.fake_run(outputs)) as run, \
+             mock.patch.object(server, "match_kit_module", return_value=mock.Mock(default_compiler=lambda: "stock")):
+            out = server.match_init("f")
+        self.assertTrue(out.get("refused"))
+        self.assertEqual(out["rc"], 3)
+        self.assertIn("sq", out["stopped"])
+        self.assertNotIn("match_kit.py init", [c.args[0] + " " + c.args[1][0] for c in run.call_args_list])
+
+    def test_match_init_warns_but_opens_sd_function(self):
+        outputs = {"fingerprint_elf.py": self.MW, "match_kit.py disasm": self.SD_DIS,
+                   "match_kit.py init": json.dumps(dict(sandbox="/nowhere"))}
+        with mock.patch.object(server, "GAME", self.bin.parent), mock.patch.object(server, "BINARY", self.bin.name), \
+             mock.patch.object(server, "run", side_effect=self.fake_run(outputs)), \
+             mock.patch.object(server, "match_kit_module", return_value=mock.Mock(default_compiler=lambda: "stock")):
+            out = server.match_init("g")
+        self.assertFalse(out.get("refused"))
+        self.assertEqual(out["sandbox"], "/nowhere")
+        self.assertIn("ee-gcc only", out["warning"])
+        self.assertEqual(out["compiler_family"]["family"], "metrowerks")
+
+    def test_gcc_original_opens_without_disasm(self):
+        outputs = {"fingerprint_elf.py": self.GCC, "match_kit.py init": json.dumps(dict(sandbox="/nowhere"))}
+        with mock.patch.object(server, "GAME", self.bin.parent), mock.patch.object(server, "BINARY", self.bin.name), \
+             mock.patch.object(server, "run", side_effect=self.fake_run(outputs)) as run, \
+             mock.patch.object(server, "match_kit_module", return_value=mock.Mock(default_compiler=lambda: "stock")):
+            out = server.match_init("g")
+        self.assertNotIn("warning", out)
+        self.assertEqual([c.args[0] for c in run.call_args_list], ["fingerprint_elf.py", "match_kit.py"])
+
+    def test_codewarrior_doc_is_served(self):
+        text = server.doc_resource("codewarrior")
+        self.assertIn("MWo", text)
+        self.assertIn("overlayID", text)
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
