@@ -26,8 +26,12 @@ six titles probed while building this kit do not hand those over directly:
                   size, and words 6-7 hold two addresses at or after the end of
                   the file (equal on every C overlay; 0xa8 apart on Yakuza, a
                   C++ title): the static-init table bounds by the R5 generator's
-                  construction, reported raw. docs/CODEWARRIOR.md has the record
-                  and the census.
+                  construction, and CodeWarrior for PS2 R3.0's own runtime
+                  (mwUtils_PS2.c) confirms it: `id, address, sz_text, sz_data,
+                  sz_bss, _static_init, _static_init_end, name[32]`; its loader
+                  clears sz_bss bytes after the file image and runs the
+                  initializers between the two pointers. docs/CODEWARRIOR.md and
+                  docs/SDK-ARCHIVE.md have the record and the census.
   ELF             passthrough: PT_LOAD segments flattened into one image whose
                   base is the lowest segment address (EE SLUS, XS1/XS3 .OVL
                   overlays, which are ELFs despite the extension).
@@ -173,10 +177,10 @@ def mwo_header(d: bytes):
     name = d[0x20:0x40].split(b"\0", 1)[0].decode("latin1")
     h = dict(version=version, overlay_id=oid, load_addr=load, text_size=text, data_size=data, name=name,
              word5=w5, word6=w6, word7=w7)
-    if version >= 3:                    # measured layout (docs/CODEWARRIOR.md): bss size moved up one slot
-        h.update(bss_size=w5, static_init=None)
+    if version >= 3:                    # mwOverlayHeader of CodeWarrior for PS2 R3.0 (mwUtils_PS2.c)
+        h.update(bss_size=w5, static_init=w6, static_init_end=w7)
     else:                               # documented layout: StaticInit, bssSize (R5; "unused" in R4), entryPoint
-        h.update(bss_size=w6, static_init=w5)
+        h.update(bss_size=w6, static_init=w5, static_init_end=None)
     return h
 
 
@@ -195,11 +199,11 @@ def describe_mwo(d: bytes, h: dict) -> dict:
         if len(d) != expected:
             notes.append(f"file is {len(d):#x} bytes, header sizes add up to {expected:#x}")
         if h["word6"] == h["word7"] == base + expected:
-            notes.append("word6 == word7 == load_addr + file size: the header is part of the image and .bss follows it "
-                         "(a C overlay: the static-init table is empty)")
-        elif h["word7"] >= h["word6"] >= base + expected:
-            notes.append(f"word6..word7 span {h['word7'] - h['word6']:#x} bytes after the image: "
-                         "the static-init table bounds by the R5 generator's construction (unproven on PS2)")
+            notes.append("static-init table is empty and sits at load_addr + file size: a C overlay; the header is part "
+                         "of the image and .bss follows the file")
+        elif h["word7"] > h["word6"]:
+            notes.append(f"static-init table: {(h['word7'] - h['word6']) // 4} initializers between _static_init and "
+                         "_static_init_end (a C++ overlay; the loader runs them after clearing .bss)")
         complete = len(d) == expected
     else:
         if len(d) < expected:
@@ -207,9 +211,11 @@ def describe_mwo(d: bytes, h: dict) -> dict:
         if h["static_init"]:
             notes.append(f"StaticInit {h['static_init']:#x}: a routine to call before anything else (C++ overlay)")
         complete = len(d) >= expected
-    header = dict(version=h["version"], overlay_id=h["overlay_id"], word6=f"{h['word6']:#x}", word7=f"{h['word7']:#x}")
-    if h["static_init"] is not None:
-        header["static_init"] = f"{h['static_init']:#x}"
+    header = dict(version=h["version"], overlay_id=h["overlay_id"], static_init=f"{h['static_init']:#x}")
+    if h["static_init_end"] is not None:
+        header["static_init_end"] = f"{h['static_init_end']:#x}"
+    else:
+        header.update(word6=f"{h['word6']:#x}", word7=f"{h['word7']:#x}")
     return dict(kind=f"mwo{h['version']}", name=h["name"], base=base, header=header,
                 segments=[dict(s, va=f"{s['va']:#x}") for s in segs], complete=complete, notes=notes)
 
@@ -275,7 +281,8 @@ def self_test() -> int:
     hdr_y = b"MWo3" + struct.pack(E + "7I", 0, 0x100000, 0x2E0D20, 0x147420, 0x9B500, 0x58FD00, 0x58FDA8) + b"main.bin".ljust(32, b"\0")
     rec, _ = describe(Path("MAIN.BIN"), hdr_y + b"\0" * 64)
     checks["mwo3-root"] = rec["header"]["overlay_id"] == 0 and rec["segments"][3]["size"] == 0x9B500 \
-        and any("static-init table" in n for n in rec["notes"]) and not rec["complete"]
+        and rec["header"]["static_init"] == "0x58fd00" and rec["header"]["static_init_end"] == "0x58fda8" \
+        and any("42 initializers" in n for n in rec["notes"]) and not rec["complete"]
     # the MWo1 record CodeWarrior for PlayStation R4 wrote for its OverlayDemo (Overlay1.bin, 1998):
     # id 1, load 0x80030000, text 0x24 (foo1), no data, StaticInit 0, name "Overlay1.bin"
     hdr1 = b"MWo1" + struct.pack(E + "7I", 1, 0x80030000, 0x24, 0, 0, 0, 0) + b"Overlay1.bin".ljust(32, b"\0")

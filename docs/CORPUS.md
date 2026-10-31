@@ -35,6 +35,12 @@ Two corrections this corpus forced on the earlier heuristics:
   Silent Hill 2 starts at the `.bss` clear, i.e. Sony's `crt0`, so the Sony
   shape never argues against CodeWarrior. The `MWo3` record and the compiler's
   version lineage are read in `docs/CODEWARRIOR.md`.
+- **`nop;nop` before `div.s` separates SCE gcc from everything else.** Sony's
+  2.9-ee-991111-01 patch (June 2000) added it and every later SCE ee-gcc kept
+  it: Xenosaga I 487/487, FFX 565/567, Xenosaga III 497/497, MGS3 193/197 (with
+  `sqrt.s` unpadded: 3.x); Silent Hill 2 70/753 and Yakuza 163/881, the SDK
+  minority of a CodeWarrior title; SDK 1.0 (1999) objects 0/3
+  (`docs/SDK-ARCHIVE.md` §2).
 - **The toolchain is chosen per studio, not per region or publisher.** Konami's
   KCET (Silent Hill 2) used CodeWarrior while Kojima Productions (MGS3) used
   SCE's GCC; Sega's Yakuza team used CodeWarrior. "Japanese = ee-gcc" holds as a

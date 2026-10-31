@@ -146,8 +146,9 @@ def startup_shape(img) -> dict | None:
     sce = any(words[i] in (LI_V1_SETUPTHREAD, LI_V1_SETUPHEAP) and words[i + 1] == SYSCALL for i in range(n - 1))
     if zeroed >= 16:
         return dict(kind="metrowerks-psstart", registers_zeroed=zeroed, sce_syscalls=sce,
-                    note=f"entry zeroes {zeroed} registers with padduw before SetupThread/SetupHeap: the Metrowerks "
-                         "PS2 startup (CodeWarrior for PlayStation's _psstart.c zeroed every register the same way)")
+                    note=f"entry zeroes {zeroed} registers with padduw before SetupThread/SetupHeap: the startup of "
+                         "Yakuza (a CodeWarrior title), the habit of CodeWarrior for PlayStation's _psstart.c; a tell "
+                         "about the title's startup file, since CodeWarrior for PS2 R3.0x stationery links Sony's crt0.s")
     if sce:
         return dict(kind="sce-crt0", registers_zeroed=0, sce_syscalls=True,
                     note="entry is Sony's crt0 shape (bss clear, SetupThread 0x3c, SetupHeap 0x3d): a startup tell, "
@@ -159,7 +160,8 @@ def startup_shape(img) -> dict | None:
 # PlayStation R4/R5 and the .comment of the PS2 titles (docs/CODEWARRIOR.md).
 MW_LINEAGE = [("2.44", "CodeWarrior for PlayStation Release 4, April 1998 (cc_mips.dll 2.44.14; release notes call it 2.39)"),
               ("2.1.", "CodeWarrior for PlayStation Release 5, May 1999 (cc_mips.dll 2.1.87, ln_mips.dll 2.1.93)"),
-              ("2.4.1", "CodeWarrior for PlayStation 2: the .comment of Silent Hill 2 (2001) and Yakuza (2006)")]
+              ("2.4.1", "CodeWarrior for PlayStation 2: a constant string of mwccps2/ccps2_mips from R3.0 (2.4.5.48, Nov 2001) "
+                        "through R3.04 (3.0.0.22, Sep 2002); it dates a title to CodeWarrior for PS2, not to a build")]
 
 
 def mw_lineage(text: str) -> str | None:
@@ -304,7 +306,7 @@ def strings_evidence(img: Image) -> dict:
 def census(img: Image) -> dict:
     c = dict(prologues=0, save_style=collections.Counter(), stride=collections.Counter(),
              sd_sp=0, sq_sp=0, sw_sp=0, lq=0, sq=0, div=0, divu=0, div_s=0, float_immediates=0,
-             float_pool_loads=0, mult3=0, words=0)
+             float_pool_loads=0, mult3=0, words=0, div_s_padded=0, sqrt_s=0, sqrt_s_padded=0)
     for blob, _va in img.code:
         n = len(blob) // 4
         words = struct.unpack_from(E + f"{n}I", blob, 0)
@@ -323,6 +325,12 @@ def census(img: Image) -> dict:
             elif op == OP_COP1:
                 if rs == 0x10 and funct == 3:
                     c["div_s"] += 1
+                    if i >= 2 and words[i - 1] == 0 and words[i - 2] == 0:
+                        c["div_s_padded"] += 1
+                elif rs == 0x10 and funct == 4:
+                    c["sqrt_s"] += 1
+                    if i >= 2 and words[i - 1] == 0 and words[i - 2] == 0:
+                        c["sqrt_s_padded"] += 1
                 elif rs == 0x04 and prev_lui == rt:          # mtc1 rt,fs right after lui rt
                     c["float_immediates"] += 1
             elif op in (OP_LWC1, OP_LDC1) and rs != SP:
@@ -382,12 +390,18 @@ def verdict(img: Image, s: dict, c: dict, startup: dict | None = None) -> dict:
             reasons.append(f"corroborated by the census: sq/16-byte saves dominate ({style.get('sq')} of {total})")
         if startup and startup["kind"] == "metrowerks-psstart":
             reasons.append(startup["note"])
+        if c["div_s"] >= 20 and c["div_s_padded"] * 2 < c["div_s"]:
+            reasons.append(f"div.s unpadded in {c['div_s'] - c['div_s_padded']} of {c['div_s']} (SCE gcc writes nop;nop "
+                           "before every div.s since 2000): the game code is not SCE gcc; the padded minority is the SDK")
     elif "sn" in families:
         name, conf = "SN Systems ProDG", "high"
         reasons.append("vendor string: " + next(v["text"] for v in s["vendor"] if v["family"] == "sn"))
     elif dominant == "sq":
         name, conf = "sq/16-byte saves: SN ProDG or Metrowerks CodeWarrior (census cannot separate them)", "medium"
         reasons.append(f"sq saves dominate ({style.get('sq')} of {total} prologues); no vendor string found")
+        if c["div_s"] >= 20 and c["div_s_padded"] * 2 < c["div_s"]:
+            reasons.append(f"div.s mostly unpadded ({c['div_s_padded']} of {c['div_s']} carry the nop;nop SCE ee-gcc "
+                           "emits from 2.9-ee-991111-01 on): the game's own code is not SCE gcc; the padded ones are the SDK")
         if img.kind.startswith("mwo"):
             name, conf = "Metrowerks CodeWarrior for PS2 (MWCC)", "high"
             reasons.append(f"{img.kind.upper().replace('MWO', 'MWo')} container: the Metrowerks linker's overlay record")
@@ -421,6 +435,15 @@ def verdict(img: Image, s: dict, c: dict, startup: dict | None = None) -> dict:
         if c["div"] + c["divu"]:
             reasons.append(f"hardware div/divu {c['div']}/{c['divu']}, div.s {c['div_s']}: real divides, no magic-multiply "
                            "or reciprocal (true of every PS2 compiler met so far; it rules out -ffast-math-style flags, not a vendor)")
+        if c["div_s"] >= 20:
+            if c["div_s_padded"] * 10 >= c["div_s"] * 9:
+                reasons.append(f"div.s preceded by nop;nop in {c['div_s_padded']} of {c['div_s']}: the padding SCE's "
+                               "2.9-ee-991111-01 patch (June 2000) put in mips.md and every later SCE ee-gcc kept; "
+                               "SDK 1.0 (1999) objects do not have it" + ("" if c["sqrt_s"] < 5 or c["sqrt_s_padded"] * 2 >= c["sqrt_s"]
+                               else f"; sqrt.s unpadded ({c['sqrt_s_padded']} of {c['sqrt_s']}): the 3.x shape (MGS3)"))
+            else:
+                reasons.append(f"div.s padded with nop;nop in only {c['div_s_padded']} of {c['div_s']}: not the SCE gcc of "
+                               "2000 on (SDK 1.0-era ee-gcc, or another compiler with SCE libraries linked)")
     else:
         name, conf = "unknown (no prologues found)", "none"
     for v in s["vendor"]:
@@ -480,7 +503,8 @@ def report(rec: dict, verbose=False) -> str:
     if c["prologues"]:
         lines.append(f"  census: {c['prologues']} prologues {c['save_style']}  strides {c['stride']}")
         lines.append(f"          sd(sp) {c['sd_sp']}  sq(sp) {c['sq_sp']}  sw(sp) {c['sw_sp']}  lq/sq {c['lq']}/{c['sq']}  "
-                     f"div/divu {c['div']}/{c['divu']}  div.s {c['div_s']}  mult3 {c['mult3']}  float imm/pool {c['float_immediates']}/{c['float_pool_loads']}")
+                     f"div/divu {c['div']}/{c['divu']}  div.s {c['div_s']} (nop;nop-padded {c['div_s_padded']})  sqrt.s {c['sqrt_s']} "
+                     f"(padded {c['sqrt_s_padded']})  mult3 {c['mult3']}  float imm/pool {c['float_immediates']}/{c['float_pool_loads']}")
     if s["comment"]:
         lines.append("  .comment: " + " | ".join(s["comment"][:4]))
     if s["vendor"] and verbose:
@@ -554,6 +578,10 @@ SD_PROLOGUE = asm(0x27BDFFC0,                 # addiu sp,sp,-0x40
                   0x46020003,                 # div.s f0,f0,f2
                   0x3C014000, 0x44810000,     # lui at,0x4000 ; mtc1 at,f0
                   0x03E00008, 0x00000000)
+SD_PADDED = asm(0x27BDFFC0, 0xFFB00000, 0xFFB10008, 0xFFBF0018,
+                0x0081001A, 0x00001012,
+                0x00000000, 0x00000000, 0x46020003,     # nop ; nop ; div.s (the SCE 991111-01 padding)
+                0x3C014000, 0x44810000, 0x03E00008, 0x00000000)
 SQ_PROLOGUE = asm(0x27BDFFC0,
                   0x7FB00000, 0x7FB10010, 0x7FBF0020,                # sq s0,s1,ra at 16-byte stride
                   0x03E00008, 0x00000000)
@@ -609,6 +637,13 @@ def self_test() -> int:
     r = fingerprint("flat", SD_PROLOGUE * 3, base=0x100000)
     checks["flat"] = r["kind"] == "raw" and r["verdict"]["compiler"].startswith("SCE ee-gcc 2.96") and not r["notes"]
     checks["report"] = "verdict:" in report(fingerprint("gnu", gnu))
+    r = fingerprint("padded", build_elf(SD_PADDED * 25))
+    checks["div-padding"] = r["census"]["div_s"] == 25 and r["census"]["div_s_padded"] == 25 \
+        and any("nop;nop in 25 of 25" in x for x in r["verdict"]["reasons"])
+    r = fingerprint("unpadded", build_elf(SD_PROLOGUE * 25))
+    checks["div-unpadded"] = r["census"]["div_s_padded"] == 0 and any("only 0 of 25" in x for x in r["verdict"]["reasons"])
+    r = fingerprint("cw", build_elf(SQ_PROLOGUE * 30 + SD_PROLOGUE * 25))
+    checks["cw-unpadded"] = any("not SCE gcc" in x for x in r["verdict"]["reasons"])
     ok = all(checks.values())
     print(json.dumps(dict(self_test="ok" if ok else "fail", checks=checks)))
     return 0 if ok else 1

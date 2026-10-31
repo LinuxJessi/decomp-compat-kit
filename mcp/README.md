@@ -48,7 +48,7 @@ the model never chooses them (the 2026-07-28 revision deprecates roots).
 | verify | `verify_tu`, `verify_unit_start` (job), `job_status` |
 | match | `match_init`, `match_card`, `match_disasm`, `match_source`, `match_write_function`, `match_edit`, `match_check`, `match_verdict`, `match_best`, `match_patch`, `match_list` |
 
-Resources: `kit://docs/{playbook|toolchain-differences|corpus|codewarrior|readme}`,
+Resources: `kit://docs/{playbook|toolchain-differences|corpus|codewarrior|sdk-archive|readme}`,
 `kit://sandbox/{function}/card`, `kit://sandbox/{function}/budget`.
 Prompt: `match_one_function(function, ceiling)`, the stock-lane worker brief.
 

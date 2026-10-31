@@ -204,3 +204,34 @@ have their own compiler and must never be judged with the EE profile.
 
 A rebuild of the same source on another host hashes differently and assembles
 identically; pin behaviour (`probe_toolchain.py`) as well as bytes.
+
+## F. Sony's own 2.9-ee-991111-01 (Tool Chain Release 2.0, August 2000)
+
+The disc that carries this toolchain, its source tarball and the SCE patch was
+read on 2026-10-31 (`docs/SDK-ARCHIVE.md` §2). Two of the behaviours above have
+an ancestor in that patch:
+
+- **A2 / loop padding.** In 991111-01 the padding lives in the *assembler*:
+  `tc-mips.c` counts a backward branch's loop body and emits `5 - len` nops
+  (`SAFE_LOOP_BODY_LEN 5`, "the Emotion Engine #2.X mistakes branch target
+  address"), moving labels past them and refusing to swap the delay slot when
+  the body is exactly five. The 2.96 `cc1` does it in `mips_r5900_lengthen_loops`
+  with a gate of 4 (stock) where the Xenosaga I retail objects need 6. Different
+  tool, different count: an object's padding says which pair padded it.
+- **`nop;nop` before `div.s`, `sqrt.s`, `rsqrt.s`** is a `mips.md` change of
+  this patch (`%(nop\;nop\;div.s %0,%1,%2%)`, length 3) that every later SCE
+  ee-gcc kept for `div.s` (3.x dropped it for `sqrt.s`). Xenosaga I: 487 of 487
+  `div.s` padded; FFX 565 of 567; MGS3 193 of 197 with 0 of 61 `sqrt.s`; SDK 1.0
+  objects 0 of 3. CodeWarrior never pads (Silent Hill 2: 70 of 753, the SDK).
+  `fingerprint_elf.py` counts it.
+- `haifa-sched.c` gets `insn_orig_block[]` initialised (an uninitialised read,
+  the A6 class of behaviour), target libraries are built `-G0`, and `cpplib.c`
+  learns Shift-JIS.
+
+The pair was **not probed**: running the downloaded `cc1` was refused by the
+session's policy. `tools/probe_toolchain.py --toolchains ~/sce-tc20 --cc1
+/toolchains/ee/gcc/lib/gcc-lib/ee/2.9-ee-991111-01/cc1 --as
+/toolchains/ee/gcc/bin/ee-as --as-flags "-EL -m5900 -mabi=eabi -G8"` is the
+command; its rows would say which of A1-A11 and B1-B11 the 2000 toolchain
+already had, and give FFX (`sd` at a 16-byte stride, the 991111 shape) a
+measured compiler.

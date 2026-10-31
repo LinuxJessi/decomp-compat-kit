@@ -293,6 +293,7 @@ class CompilerFamily(unittest.TestCase):
         text = server.doc_resource("codewarrior")
         self.assertIn("MWo", text)
         self.assertIn("overlayID", text)
+        self.assertIn("991111-01", server.doc_resource("sdk-archive"))
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

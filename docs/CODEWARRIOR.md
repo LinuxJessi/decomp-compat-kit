@@ -2,16 +2,17 @@
 
 Two of the six games in `docs/CORPUS.md` were built with Metrowerks CodeWarrior
 (Silent Hill 2, Yakuza), and the kit knew that only from a `.comment` string and
-an `MWo3` header it could not fully read. No CodeWarrior for PS2 release is
-preserved anywhere this project can reach. What is preserved is its direct
-ancestor: **CodeWarrior for PlayStation Release 4 (1998) and Release 5 (1999)**,
+an `MWo3` header it could not fully read. This file was written from the direct
+ancestor of the PS2 product, which was read first: **CodeWarrior for PlayStation Release 4 (1998) and Release 5 (1999)**,
 the PS1 product, on the Internet Archive item `CodeWarriorForPlayStation` (two
 redump images, raw 2352-byte sectors). The same Metrowerks MIPS back end,
 linker, overlay linker, runtime sources, linker-command-file language and
 manuals carried over to the PS2 product with the version number continuing, so
 these discs document most of what a PS2 CodeWarrior binary contains. This file
 is what they taught, with the documented parts and the measured parts kept
-apart. The tools that use it: `tools/unwrap_image.py` (the overlay record),
+apart. CodeWarrior for PlayStation 2 Releases 3.0, 3.01 and 3.04 were read the
+same day (`docs/SDK-ARCHIVE.md` §4); where they confirm or correct a line below
+it says so. The tools that use it: `tools/unwrap_image.py` (the overlay record),
 `tools/fingerprint_elf.py` (the startup tell, the version lineage), and the MCP
 server's compiler-family check.
 
@@ -44,12 +45,13 @@ into the PS2 product:
 |---|---|
 | `2.44.14` (DLL resource), "2.39" (release notes) | CodeWarrior for PlayStation R4, 1998 |
 | `2.1.87` compiler, `2.1.93` linker | CodeWarrior for PlayStation R5, 1999 |
-| `MW MIPS C Compiler (2.4.1.01)` in `.comment` | CodeWarrior for PlayStation 2: Silent Hill 2 (2001) and Yakuza (2006) carry the same string |
+| `MW MIPS C Compiler (2.4.1.01)` in `.comment` | CodeWarrior for PlayStation 2: a constant string of `mwccps2` / `ccps2_mips` from R3.0 (2.4.5.0048, Nov 2001) through R3.04 (3.0.0 Build 22, Sep 2002); Silent Hill 2 (2001) and Yakuza (2006) carry it |
 
-`fingerprint_elf.py` prints the row a vendor string belongs to. Two titles
-five years apart with the same `2.4.1.01` says the PS2 compiler stopped
-changing early; it does not say the two games used the same linker or SDK
-(their `PsIIlib` banners differ: 2.2.x against 3.0.0).
+`fingerprint_elf.py` prints the row a vendor string belongs to. The PS2 string
+does not move with the build (confirmed against three releases), so it dates a
+title to CodeWarrior for PS2 and no further; the front-end version lives in
+`__MWERKS__` (0x2405 for the 2.4 series, 0x3000 for 3.0) and nowhere in the
+binary.
 
 ## 2. The overlay record (`MWo` + version)
 
@@ -109,9 +111,13 @@ Silent Hill 2 stage overlays `GX/GY/GZ/*.BIN` and on Yakuza's `MAIN.BIN`):
 So version 3 moved the bss size up one slot and kept two address words. By the
 R5 generator's construction the static-init pointer is the address right after
 the data part, which is exactly `load + file size` for a C overlay, and a C++
-title would have a table there; `0xa8` is 42 words. That reading of words 6-7
-is a hypothesis from the construction, not a proof: the tool reports them raw
-with a note. `Clear - bss` in R5 shows the intended loader: `bload` the file,
+title would have a table there; `0xa8` is 42 words. **Confirmed** afterwards by
+CodeWarrior for PS2 R3.0 itself: `mwUtils_PS2.c` declares `mwOverlayHeader
+{ identifier[3]; version; id; address; sz_text; sz_data; sz_bss; _static_init;
+_static_init_end; name[32] }`, the example LCF writes the fields in that order
+after `WRITEB 0x33 # '3', ver.3`, and `mwOverlayInit` clears `sz_bss` bytes
+after the file image and runs the initializers between the two pointers.
+`unwrap_image.py` names them so. `Clear - bss` in R5 shows the intended loader: `bload` the file,
 `MWNotifyOverlayLoaded(addr)` for the debugger, then
 `memset(addr + fileSize, 0, header->bssSize)`, because from R5 on the `.bss`
 is no longer stored in the file ("fast-loading overlays"). Every PS2 sample
@@ -136,15 +142,21 @@ value, not the address) and that `_heap_size` / `_stack_size` are in kilobytes.
 `_gp = _fsdata + 0x8000` and `.sbss` must follow `.sdata`: "`_gp` is the only
 symbol known to the linker. Do not change the name."
 
-Whether a PS2 CodeWarrior binary keeps this block was not settled: Silent Hill
-2's `SLUS_202.28` has no run of overlay load addresses that could be the table
-(the 50 copies of `0x1f0bc00` at a 40-byte stride are a stage table of the
-game's own), and Yakuza's loader has a plausible but unproven cluster
-(`0x100000, 0x167c80, 0x62b300` = the three segment starts) at `0x153490`.
-Open; a decomp of either title should look for it with its own symbols.
+On PS2 the generator keeps far less of this: the R3.0 LCFs write only
+`__static_init`/`__static_init_end`, `__exception_table_start__`/`_end__`,
+`_overlay_group_addresses` (one word per overlay group, index 0 = `.main`,
+read by `mwGetGroupAddress`), `__data_start`/`__data_end`, `__bss_start`/
+`__bss_end`, `_fbss`, and `_gp = ALIGN(128) + 0x7FF0`; the sizes are linker
+symbols, not data words. Silent Hill 2's `SLUS_202.28` has no run of overlay
+load addresses that could be the table (the 50 copies of `0x1f0bc00` at a
+40-byte stride are a stage table of the game's own), so Konami's overlays were
+not loaded through `_overlay_group_addresses`; Yakuza's loader has a plausible
+but unproven cluster (`0x100000, 0x167c80, 0x62b300`) at `0x153490`.
 
 **The LCF language** (R5 manual chapter 6, and the two sample files under
-`MIPS Support/Linker Command Files/`): `MEMORY { name (RWX|RWXO) : ORIGIN =
+`MIPS Support/Linker Command Files/`; the PS2 dialect adds `AFTER()`,
+`KEEP_SECTION`, `ALIGNALL`, `LITERAL`, `WRITES`, the `U` flag, see
+`docs/SDK-ARCHIVE.md` §4): `MEMORY { name (RWX|RWXO) : ORIGIN =
 addr, LENGTH = n [> file] }`, `SECTIONS { ..name : { ... } > region }`,
 `GROUP(ROOT|overlay) (.section)`, `STATICINIT(ROOT|overlay)`, `EXCEPTION`,
 `WRITEB`/`WRITEW`, `ADDR()`, `SIZEOF()`, `ALIGN()`, `AFTER(seg)`, `OVERLAYID(..seg)`,
@@ -182,14 +194,21 @@ entry with `padduw $1..$31, $zero, $zero` (29 of them: `$k0`/`$k1` skipped),
 has: clear `.bss` with `sq`, `SetupThread` (syscall 0x3c with `gp`, stack,
 stack size, args, root), `SetupHeap` (0x3d), two init calls, `ei`, load `argc`,
 `main`, `j Exit`. Silent Hill 2's `SLUS_202.28` begins straight at the `.bss`
-clear: Konami linked Sony's `crt0`, under CodeWarrior. Hence the rule the
-fingerprint tool now applies:
+clear: Konami linked Sony's `crt0`, under CodeWarrior. The CodeWarrior for
+PS2 R3.0x stationery, read afterwards, links **Sony's `crt0.s` unchanged**, so
+in 2001-2002 a Metrowerks title started exactly like an SCE-gcc one; Yakuza's
+register zeroing is a later runtime's or Sega's own. Hence the rule the
+fingerprint tool applies:
 
-- a run of `padduw rd,$zero,$zero` at the entry point is the **Metrowerks PS2
-  startup**, a vendor tell as good as a `.comment` when the `.comment` is gone
-  (`startup: metrowerks-psstart`);
+- a run of `padduw rd,$zero,$zero` at the entry point is the register-zeroing
+  startup seen on Yakuza, the habit of CodeWarrior for PlayStation's
+  `_psstart.c` (`startup: metrowerks-psstart`): a tell about the title's
+  startup file, reported with that caveat, medium confidence on its own;
 - the Sony `crt0` shape at the entry is a startup tell only, and never argues
-  against CodeWarrior (`startup: sce-crt0`).
+  against CodeWarrior (`startup: sce-crt0`);
+- the stronger separator is in the code itself: SCE gcc writes `nop;nop`
+  before every `div.s` from 2.9-ee-991111-01 (June 2000) on, CodeWarrior never
+  does (Silent Hill 2: 70 of 753 `div.s` padded, the SDK minority).
 
 ## 5. The compiler's vocabulary (what a matcher may write)
 
@@ -273,14 +292,14 @@ from the release notes, which lag them.
   the loop would charge a budget for a verdict it cannot reach. Functions with
   `sd` prologues in such a binary (the Sony SDK and middleware) still open.
 
-## 8. What the discs do not give
+## 8. What the discs do not give, and what turned up next
 
-A PS2 compiler. The kit has no CodeWarrior lane, so for Silent Hill 2 and
-Yakuza the matching tools cover the ee-gcc minority only (414 of 2,514
-prologues in SH2's main executable, 1,844 of 5,523 in Yakuza's `MAIN.BIN`, the
-Sony and CRI libraries). Running the PS1 plugin itself would need the Win32 IDE
-under an emulator and would still compile for the R3000, which is useful for
-PS1 matching and for learning the back end's habits, not for a PS2 byte match.
-If a CodeWarrior for PS2 release ever surfaces, the record above says what to
-look for first: the `cc_mips`/`ln_mips` plugin versions, the LCF generator's
-version-3 writer, and the `_psstart` source.
+The PS1 discs give no PS2 compiler. CodeWarrior for PlayStation 2 R3.0, 3.01
+and 3.04 then surfaced (`docs/SDK-ARCHIVE.md` §4) with `mwccps2.exe`, a
+command-line Win32 compiler, so a CodeWarrior lane is possible in principle
+(Wine in a container); it has not been run, and until it is, the kit's
+matching tools cover the ee-gcc minority of a CodeWarrior title only (414 of
+2,514 prologues in SH2's main executable, 1,844 of 5,523 in Yakuza's
+`MAIN.BIN`, the Sony and CRI libraries). Of the three things this file said to
+look for first, two are now in hand (the plugin versions and the version-3
+writer); the PS2 runtime has no `_psstart`, it links Sony's `crt0.s`.
