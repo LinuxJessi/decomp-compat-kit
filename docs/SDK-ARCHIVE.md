@@ -137,9 +137,10 @@ PS1 product):
   in an amd64 container, as decomp.me runs the GameCube `mwcceppc`), and was
   not attempted in this session for the same policy reason as the Sony `cc1`.
 - **Running them.** `tools/cw_run.py` hosts the tools two ways: a native Wine
-  (`$CW_WINE`, `wine` on PATH, or the Wine Crossover bundle from the
-  `gcenx/wine` Homebrew tap, the only Apple Silicon Wine not disabled by
-  Gatekeeper in Homebrew as of 2026-10; 32-bit tools run through Rosetta in
+  (`$CW_WINE`, `wine` on PATH, or an app bundle: as of 2026-10 every WineHQ
+  cask in Homebrew is disabled for Gatekeeper and the `gcenx/wine` tap carries
+  only `game-porting-toolkit`, Apple's Wine 10 build with 32-bit WoW64, whose
+  cask strips the quarantine itself; 32-bit tools run through Rosetta in
   seconds), or the docker image `cw-wine:amd64-booted`. The image is a
   `debian:bookworm-slim` run with `--platform linux/amd64`, `dpkg
   --add-architecture i386; apt-get install wine wine32:i386`, then `docker

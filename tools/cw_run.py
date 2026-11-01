@@ -7,8 +7,10 @@ CodeWarrior for PS2 R3.0-3.04 ships Win32 command-line tools (docs/SDK-ARCHIVE.m
 lane for Silent Hill 2 or Yakuza starts here. Two ways to host them:
 
   native   a Wine on the host: $CW_WINE, then `wine`/`wine64`/`wine32on64` on PATH,
-           then Wine Crossover's bundle (gcenx/wine tap: Apple Silicon runs the
-           32-bit tools through Rosetta in seconds);
+           then an app bundle: the Game Porting Toolkit (gcenx/wine tap, Wine 10
+           with 32-bit WoW64, the quarantine stripped by the cask) or an older
+           Wine Crossover; Apple Silicon runs the 32-bit tools through Rosetta
+           in seconds;
   docker   the kit's amd64 container image (`cw-wine:amd64-booted`, a Debian with
            wine32 and a booted prefix; see docs/SDK-ARCHIVE.md §4 for how it was
            made). On an arm64 host this is qemu-i386 inside an emulated amd64
@@ -42,6 +44,7 @@ import sys
 from pathlib import Path
 
 CROSSOVER_BUNDLES = [
+    "/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wine64",   # gcenx/wine cask, Wine 10 WoW64
     "/Applications/Wine Crossover.app/Contents/Resources/wine/bin/wine",
     "/Applications/Wine Crossover.app/Contents/Resources/wine/bin/wine32on64",
     "/Applications/Wine Stable.app/Contents/Resources/wine/bin/wine",
@@ -62,9 +65,9 @@ def find_native() -> tuple[str | None, str]:
             return p, f"{name} on PATH"
     for p in CROSSOVER_BUNDLES:
         if Path(p).is_file():
-            return p, "Wine Crossover bundle"
-    return None, ("no native wine: set CW_WINE, or install Wine Crossover "
-                  "(brew tap gcenx/wine && brew install --cask --no-quarantine gcenx/wine/wine-crossover)")
+            return p, f"app bundle {p.split('/')[2]}"
+    return None, ("no native wine: set CW_WINE, or install the Game Porting Toolkit build "
+                  "(brew tap gcenx/wine && brew install --cask gcenx/wine/game-porting-toolkit)")
 
 
 def find_docker_image() -> tuple[str | None, str]:
