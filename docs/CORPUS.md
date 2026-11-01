@@ -1,5 +1,9 @@
 # Corpus: what built six PS2 games, as measured
 
+One page per game, with the tools that apply and what is open, is under
+[`games/`](games/README.md); this file is the measured table and the rules it
+forced.
+
 Every row below is the output of `tools/fingerprint_elf.py` (and, where the
 code is not a plain ELF, `tools/unwrap_image.py` first) run on the retail
 executables of discs the author owns. The numbers are reproducible with those

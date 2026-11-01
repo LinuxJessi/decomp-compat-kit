@@ -35,7 +35,7 @@ name_lookup, name_transfer_symbols | triage_function, triage_unit |
 probe_toolchain_start | verify_tu, verify_unit_start | job_status |
 match_init, match_card, match_disasm, match_source, match_write_function,
 match_edit, match_check, match_verdict, match_best, match_patch, match_list.
-Resources: kit://docs/{playbook|toolchain-differences|corpus|codewarrior|sdk-archive|readme},
+Resources: kit://docs/{playbook|toolchain-differences|corpus|codewarrior|sdk-archive|tools|mcp|history|games|readme},
 kit://sandbox/{function}/card, kit://sandbox/{function}/budget.
 Prompt: match_one_function.
 
@@ -78,6 +78,7 @@ DOCKER_IMAGE = os.environ.get("DECOMP_IMAGE", "debian:bookworm-slim")   # verify
 TEXT_LIMIT = 12000            # characters of tool stdout returned before truncation
 DOCS = {"playbook": "MATCHING-PLAYBOOK.md", "toolchain-differences": "TOOLCHAIN-DIFFERENCES.md",
         "corpus": "CORPUS.md", "codewarrior": "CODEWARRIOR.md", "sdk-archive": "SDK-ARCHIVE.md",
+        "tools": "TOOLS.md", "mcp": "MCP.md", "history": "HISTORY.md", "games": "games/README.md",
         "readme": "../README.md"}
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False)
@@ -906,7 +907,7 @@ def match_list() -> dict[str, Any]:
 # ---------------------------------------------------------------- resources and prompt
 
 @server.resource("kit://docs/{name}", name="kit docs", mime_type="text/markdown",
-                 description="Kit documents: playbook, toolchain-differences, corpus, codewarrior, sdk-archive, readme")
+                 description="Kit documents: playbook, toolchain-differences, corpus, codewarrior, sdk-archive, tools, mcp, history, games, readme")
 def doc_resource(name: str) -> str:
     rel = DOCS.get(name)
     if not rel:

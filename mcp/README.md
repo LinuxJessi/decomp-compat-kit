@@ -1,5 +1,9 @@
 # ps2decomp: the kit as an MCP server
 
+The plain-language explanation of what the server does and why it helps is
+[`../docs/MCP.md`](../docs/MCP.md); this file is the install, the tool list and
+the run log.
+
 `mcp/server.py` exposes the PS2-Decomp Compatibility Kit to any Model Context
 Protocol client (Claude Code, Claude Desktop, Codex, Cursor, a script) over
 stdio. Every tool shells out to the kit's own `tools/*.py`, so a verdict reached
@@ -48,7 +52,7 @@ the model never chooses them (the 2026-07-28 revision deprecates roots).
 | verify | `verify_tu`, `verify_unit_start` (job), `job_status` |
 | match | `match_init`, `match_card`, `match_disasm`, `match_source`, `match_write_function`, `match_edit`, `match_check`, `match_verdict`, `match_best`, `match_patch`, `match_list` |
 
-Resources: `kit://docs/{playbook|toolchain-differences|corpus|codewarrior|sdk-archive|readme}`,
+Resources: `kit://docs/{playbook|toolchain-differences|corpus|codewarrior|sdk-archive|tools|mcp|history|games|readme}`,
 `kit://sandbox/{function}/card`, `kit://sandbox/{function}/budget`.
 Prompt: `match_one_function(function, ceiling)`, the stock-lane worker brief.
 
