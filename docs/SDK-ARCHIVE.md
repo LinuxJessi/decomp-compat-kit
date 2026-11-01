@@ -136,6 +136,20 @@ PS1 product):
   `-disassemble`. A CodeWarrior lane for the kit is therefore possible (Wine
   in an amd64 container, as decomp.me runs the GameCube `mwcceppc`), and was
   not attempted in this session for the same policy reason as the Sony `cc1`.
+- **Running them.** `tools/cw_run.py` hosts the tools two ways: a native Wine
+  (`$CW_WINE`, `wine` on PATH, or the Wine Crossover bundle from the
+  `gcenx/wine` Homebrew tap, the only Apple Silicon Wine not disabled by
+  Gatekeeper in Homebrew as of 2026-10; 32-bit tools run through Rosetta in
+  seconds), or the docker image `cw-wine:amd64-booted`. The image is a
+  `debian:bookworm-slim` run with `--platform linux/amd64`, `dpkg
+  --add-architecture i386; apt-get install wine wine32:i386`, then `docker
+  commit` (a `docker build --platform` on this colima produced an arm64 image
+  that could not load `kernel32.dll`), booted once and committed again. On an
+  arm64 host the image runs Wine as qemu-i386 inside an emulated amd64 box:
+  every prefix boot took about ten minutes, so `cw_run.py` keeps one
+  `wineserver -p` per invocation and the image carries a booted prefix.
+  The tools expect `license.dat` beside them; the R3.04 installer's file
+  licenses the PS2 plugins only until 18-nov-2002 (FLEXlm, `lmgr326b.dll`).
 - **The `.comment` string `MW MIPS C Compiler (2.4.1.01)` is constant** across
   ccps2_mips 2.4.5.0048 (R3.0, Nov 2001), 2.4.5.0051 (R3.01, Jan 2002) and
   3.0.0 Build 22 (R3.04, Sep 2002): it dates a title to CodeWarrior for PS2,
