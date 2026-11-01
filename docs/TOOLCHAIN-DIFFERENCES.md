@@ -228,10 +228,35 @@ an ancestor in that patch:
   the A6 class of behaviour), target libraries are built `-G0`, and `cpplib.c`
   learns Shift-JIS.
 
-The pair was **not probed**: running the downloaded `cc1` was refused by the
-session's policy. `tools/probe_toolchain.py --toolchains ~/sce-tc20 --cc1
-/toolchains/ee/gcc/lib/gcc-lib/ee/2.9-ee-991111-01/cc1 --as
-/toolchains/ee/gcc/bin/ee-as --as-flags "-EL -m5900 -mabi=eabi -G8"` is the
-command; its rows would say which of A1-A11 and B1-B11 the 2000 toolchain
-already had, and give FFX (`sd` at a 16-byte stride, the 991111 shape) a
-measured compiler.
+The pair **was probed** on 2026-10-31 (`docs/probes/ee-gcc-2.9-ee-991111-01.json`;
+the binaries do their work and then abort inside `exit()` on a modern glibc,
+which the probe now tolerates when the output is complete):
+
+| probe | 991111-01 (Sony, Aug 2000) | retail Xenosaga I | stock 2.96 |
+|---|---|---|---|
+| decimal literals (A1) | **round to nearest, all six exact** | round to nearest | truncate toward zero |
+| short-loop padding (A2) | pads to 5 instructions, in the assembler | 7 (lp7) | gate 4, in cc1 |
+| FP compare, branch hazard nop (B1), C path | **nop present** | nop | absent |
+| same, assembler alone under `.set reorder` | no nop | nop | absent |
+| `move` expansion (B6) | `daddu`, delay slot filled | `daddu` | `daddu` |
+| `break 7` encoding (B7) | `0x000001cd`, lower field | lower field | lower field |
+| `la $3,1($2)` (B5) | two instructions (`li`; `addu`) | one `addiu` | one `addiu` |
+| `vsqrt` bits 21-22 (B4) | `00` | `01` | `01` |
+| small data | `$gp`-relative at `-G 8` | per TU | per TU |
+
+**Proof that this is the pair that built the SDK 2.0 libraries:** the Runtime
+Library 2.0 disc ships `sce/ee/src/lib/vu0/libvu0.c` next to `lib/libvu0.a`.
+Compiled with this `cc1` (its integrated preprocessor, the driver's own `-D`
+set) at the Makefile's flags `-O2 -G0 -fno-common -Wall` and assembled with
+this `as` (`-G0`; the ee-configured defaults equal `-EL -m5900 -mabi=eabi`),
+the object's `.text` (3,388 bytes) and `.data` (48) are **byte-identical** to
+the shipped `libvu0.o`. (The `libsdr` sources on the same disc do not match
+their archive: different section sizes, a source/object revision mismatch, not
+a compiler verdict.)
+
+So the 2000 toolchain already rounded literals the way retail does (2.96's
+truncation is the odd one out), carries the FP-branch hazard nop, and has the
+2.9-era `la` and `vsqrt` encodings the Xenosaga I project had to patch the
+other way. Its loop padding is the assembler's five, not the compiler's six
+or seven, so it is not the pair that built Xenosaga I; for FFX (2001, `sd` at
+a 16-byte stride) it is the first candidate to try a function against.

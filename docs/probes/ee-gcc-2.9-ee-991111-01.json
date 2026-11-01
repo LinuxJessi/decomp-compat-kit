@@ -1,0 +1,124 @@
+{
+ "cc1": {
+  "path": "/Users/jessi/sce-tc20/ee/gcc/lib/gcc-lib/ee/2.9-ee-991111-01/cc1",
+  "box": "/toolchains/ee/gcc/lib/gcc-lib/ee/2.9-ee-991111-01/cc1",
+  "run": "loader",
+  "sha256": "67ccdce560770320a438d3a90d3bf1c3f5af7df27820dfb4b616b24840fa6c55",
+  "version": "GNU C version 2.9-ee-991111-01 (ee) compiled by GNU C version 2.8.1."
+ },
+ "ee_as": {
+  "path": "/Users/jessi/sce-tc20/ee/gcc/bin/ee-as",
+  "box": "/toolchains/ee/gcc/bin/ee-as",
+  "run": "loader",
+  "sha256": "cb909465e826106e8ad11f11bb201476a0b64a5012829cd2a440ca3eaf732a03",
+  "version": "GNU assembler 2.9-ee-991111"
+ },
+ "cc1_flags": "-quiet -O2 -G 8",
+ "as_flags": "-EL -m5900 -mabi=eabi -G8",
+ "image": "debian:bookworm-slim",
+ "work": "/Users/jessi/.cache/decomp-probe/run-16692-1793491438453",
+ "probes": [
+  {
+   "probe": "literal-rounding",
+   "observed": "round to nearest",
+   "retail": "round to nearest",
+   "verdict": "same as retail",
+   "detail": [
+    "0.1: 0x3fb999999999999a (exact)",
+    "-0.1: 0xbfb999999999999a (exact)",
+    "3.141592653589793: 0x400921fb54442d18 (exact)",
+    "1.0e-300: 0x01a56e1fc2f8f359 (exact)",
+    "0.1f: 0x3dcccccd (exact)",
+    "2.5987625122e-05: 0x37da0000 (exact)"
+   ]
+  },
+  {
+   "probe": "short-loop-padding",
+   "observed": "pads unfilled-slot loops to 5-d (catalog 2.96)",
+   "retail": "7-d nops on an unfilled-slot back branch (lp7)",
+   "verdict": "differs",
+   "detail": [
+    "spin3: d=3 nops=2",
+    "spin5: d=5 nops=0"
+   ]
+  },
+  {
+   "probe": "fp-branch-hazard-nop (C)",
+   "observed": "cc1 + as: nop after c.cond.s",
+   "retail": "nop between c.cond.s and bc1t",
+   "verdict": "same as retail",
+   "detail": [
+    "460d6034 00000000 45010002"
+   ]
+  },
+  {
+   "probe": "fp-branch-hazard-nop (asm)",
+   "observed": "as alone, .set reorder: no nop between c.cond.s and the branch",
+   "retail": "nop between c.cond.s and bc1t",
+   "verdict": "differs",
+   "detail": [
+    "460e6034 45010003"
+   ]
+  },
+  {
+   "probe": "move-expansion",
+   "observed": "move -> daddu; assembler fills the delay slot under .set reorder",
+   "retail": "daddu (historical gas; modern gas emits or)",
+   "verdict": "same as retail",
+   "detail": [
+    "0080102d = daddu $2,$4,$0",
+    "placed in the jr delay slot"
+   ]
+  },
+  {
+   "probe": "break-encoding",
+   "observed": "break 7 -> 0x000001cd (code in the lower field)",
+   "retail": "break 0,7 = 0x000001cd (lower field)",
+   "verdict": "same as retail",
+   "detail": []
+  },
+  {
+   "probe": "la-imm16",
+   "observed": "la $3,1($2) -> 2 instructions",
+   "retail": "one addiu (gas 2.10 behaviour)",
+   "verdict": "differs",
+   "detail": [
+    "24030001 00621821"
+   ]
+  },
+  {
+   "probe": "jump-table-add",
+   "observed": "no jump table through .rodata found",
+   "retail": "addu",
+   "verdict": "unknown",
+   "detail": []
+  },
+  {
+   "probe": "vsqrt-bits-21-22",
+   "observed": "vsqrt -> 0x4b8103bd, bits 21-22 = 00",
+   "retail": "01",
+   "verdict": "differs",
+   "detail": []
+  },
+  {
+   "probe": "section-padding",
+   "observed": ".text of a 3-word function is 12 bytes (no trailing alignment padding)",
+   "retail": "not observable in a linked image",
+   "verdict": "unknown",
+   "detail": []
+  },
+  {
+   "probe": "small-data (-G)",
+   "observed": "8-byte global gp-relative, 4-byte global gp-relative",
+   "retail": "XS1 main: -G8 for most TUs, -G0 for some; overlays often -G0",
+   "verdict": "n/a (per-TU flag)",
+   "detail": [
+    "GPREL16 at text offsets [4, 12]"
+   ]
+  }
+ ],
+ "failures": [],
+ "notes": [
+  "17 steps aborted inside exit() after writing complete output (a 2000-era SCE binary on a modern glibc: its static crtend's __deregister_frame_info fails); the outputs were judged, the exit status was not"
+ ]
+}

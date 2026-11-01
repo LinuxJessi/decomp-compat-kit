@@ -339,11 +339,17 @@ def build_script(cc1: Tool, ee_as: Tool, cc1_flags: str, as_flags: str) -> str:
              "cd /work", f"$T {cc1.cmd} --version </dev/null >ver_cc1.txt 2>&1",
              f"$T {cc1.cmd} -version -quiet src/div.i -o /dev/null >>ver_cc1.txt 2>&1",   # GCC 2.x: 'GNU C version ...'
              f"$T {ee_as.cmd} --version >ver_as.txt 2>&1"]
+    # ok(): a 2000-era SCE binary (Tool Chain 2.0's cc1 and ee-as) does its work, then aborts
+    # inside exit() on a modern glibc (its static crtend calls __deregister_frame_info, which
+    # the libc stub makes fail). The output is complete by then (cc1 fcloses the .s, gas has
+    # bfd_closed the object), so rc 134 with a non-empty output counts as success and is
+    # noted as ABORT-AT-EXIT; any other failure keeps its code.
+    lines.append('step() { if [ "$4" -eq 134 ] && [ -s "$3" ]; then echo "ABORT-AT-EXIT $3"; echo "$1 $2 0"; else echo "$1 $2 $4"; fi; }')
     for name in C_SOURCES:
-        lines.append(f'$T {cc1.cmd} src/{name}.i {cc1_flags} -o out/{name}.s 2>out/{name}.cc1err; echo "CC1 {name} $?"')
-        lines.append(f'$T {ee_as.cmd} {as_flags} -o out/{name}.o out/{name}.s 2>out/{name}.aserr; echo "AS {name} $?"')
+        lines.append(f'$T {cc1.cmd} src/{name}.i {cc1_flags} -o out/{name}.s 2>out/{name}.cc1err; step CC1 {name} out/{name}.s $?')
+        lines.append(f'$T {ee_as.cmd} {as_flags} -o out/{name}.o out/{name}.s 2>out/{name}.aserr; step AS {name} out/{name}.o $?')
     for name in S_SOURCES:
-        lines.append(f'$T {ee_as.cmd} {as_flags} -o out/{name}.o src/{name}.s 2>out/{name}.aserr; echo "AS {name} $?"')
+        lines.append(f'$T {ee_as.cmd} {as_flags} -o out/{name}.o src/{name}.s 2>out/{name}.aserr; step AS {name} out/{name}.o $?')
     lines.append("exit 0")
     return "\n".join(lines) + "\n"
 
@@ -362,10 +368,15 @@ def run_box(work: Path, rootfs: Path, toolchains, extra: list, image: str, timeo
     except subprocess.TimeoutExpired:
         return 124, {}, f"docker run exceeded {timeout} s"
     rcs = {}
+    aborted = 0
     for line in out.stdout.splitlines():
         parts = line.split()
         if len(parts) == 3 and parts[0] in ("CC1", "AS"):
             rcs[(parts[0], parts[1])] = int(parts[2])
+        elif parts[:1] == ["ABORT-AT-EXIT"]:
+            aborted += 1
+    if aborted:
+        rcs[("NOTE", "abort-at-exit")] = aborted
     return out.returncode, rcs, (out.stderr or out.stdout).strip()[-1500:]
 
 
@@ -459,10 +470,16 @@ def probe(args) -> int:
     row("small-data (-G)", classify_small_data(obj("gsmall")[1]), "XS1 main: -G8 for most TUs, -G0 for some; overlays often -G0")
 
     failures = [f"{k[0]} {k[1]} rc={v}: {first_line(work / 'out' / (k[1] + ('.cc1err' if k[0] == 'CC1' else '.aserr')))}"
-                for k, v in sorted(rcs.items()) if v != 0]
+                for k, v in sorted(rcs.items()) if v != 0 and k[0] != "NOTE"]
+    notes = []
+    if rcs.get(("NOTE", "abort-at-exit")):
+        notes.append(f"{rcs[('NOTE', 'abort-at-exit')]} steps aborted inside exit() after writing complete output "
+                     "(a 2000-era SCE binary on a modern glibc: its static crtend's __deregister_frame_info fails); "
+                     "the outputs were judged, the exit status was not")
     report = dict(cc1=dict(path=str(cc1.host), box=cc1.box, run=cc1.run, sha256=cc1.sha256, version=first_line(work / "ver_cc1.txt", "GNU C version")),
                   ee_as=dict(path=str(ee_as.host), box=ee_as.box, run=ee_as.run, sha256=ee_as.sha256, version=first_line(work / "ver_as.txt")),
-                  cc1_flags=args.cc1_flags, as_flags=args.as_flags, image=args.image, work=str(work), probes=rows, failures=failures)
+                  cc1_flags=args.cc1_flags, as_flags=args.as_flags, image=args.image, work=str(work), probes=rows, failures=failures,
+                  notes=notes)
 
     print(f"cc1    {report['cc1']['version'] or '?'}  sha256 {cc1.sha256[:12]}  [{cc1.run}]  {args.cc1_flags}")
     print(f"ee-as  {report['ee_as']['version'] or '?'}  sha256 {ee_as.sha256[:12]}  [{ee_as.run}]  {args.as_flags}")
@@ -479,6 +496,8 @@ def probe(args) -> int:
         print("-" * 100)
         for f in failures:
             print(f"  step failed: {f}")
+    for n in notes:
+        print(f"  note: {n}")
     if args.json:
         Path(args.json).write_text(json.dumps(report, indent=1))
         print(f"\nwrote {args.json}")

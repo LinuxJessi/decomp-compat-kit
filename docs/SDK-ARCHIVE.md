@@ -89,12 +89,20 @@ time (`-fshort-double` varargs, a strength-reduction miscompile fixed by
 1.0's lists the 1999 ones (an `insn 340 ... mult:SI` internal error at `-O2`,
 `-Os` as the workaround).
 
-**Not run.** Executing this `cc1` (even inside the kit's i386 docker box, via
-`tools/probe_toolchain.py --toolchains ~/sce-tc20 ...`) was refused by the
-session's permission policy as downloaded code; the probe command is ready in
-the kit and the toolchain is staged under `~/sce-tc20/ee/gcc`. Running it
-would give the kit a measured third compiler profile (FFX's `sd`-at-16 stride
-is the 991111 shape) and settle which of the A/B behaviours this pair has.
+**Probed** (`tools/probe_toolchain.py --rootfs <i386 rootfs> --toolchains
+~/sce-tc20 --cc1 /toolchains/ee/gcc/lib/gcc-lib/ee/2.9-ee-991111-01/cc1 --as
+/toolchains/ee/gcc/bin/ee-as --as-flags "-EL -m5900 -mabi=eabi -G8"`, report in
+`docs/probes/ee-gcc-2.9-ee-991111-01.json`): literals round to nearest (every
+one exact), loops padded to five by the assembler, the FP-branch hazard nop
+present on the C path, `move` as `daddu`, `break` in the lower field, `la` as
+two instructions, `vsqrt` bits `00`. The binaries abort inside `exit()` on a
+modern glibc after writing complete output (their static crtend's
+`__deregister_frame_info` fails against the libc stub); the probe treats rc 134
+with a non-empty output as success and says so. The table and what it means
+are in `docs/TOOLCHAIN-DIFFERENCES.md` §F, together with the proof that this
+pair built the SDK 2.0 libraries: `libvu0.c` from the disc's `src/lib`,
+compiled with this `cc1` and `as` at the Makefile's flags, reproduces the
+shipped `libvu0.o` byte for byte.
 
 ## 3. The SDK libraries as a symbol donor
 
