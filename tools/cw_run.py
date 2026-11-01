@@ -26,7 +26,7 @@ the tool are translated with `winepath -w` for native runs and mapped under
 
 Usage:
   ./cw_run.py --tools ~/cwps2/3.04 -- mwccps2 -version
-  ./cw_run.py --tools ~/cwps2/3.04 -- mwccps2 -c -S -O2 -prefix PREFIX_PS2.h -I ~/cwps2/3.04/PS2_Support -o t1.s t1.c
+  ./cw_run.py --tools ~/cwps2/3.04 --as-of 2002-06-01 -- mwccps2 -c -S -O2 -prefix PREFIX_PS2.h -I ~/cwps2/3.04/PS2_Support -o t1.s t1.c
   ./cw_run.py --tools ~/cwps2/3.04 --runner docker -- mwccps2 -help
   ./cw_run.py --which               # which runner would be used, and why
   ./cw_run.py --self-test
@@ -95,42 +95,77 @@ def choose(runner: str) -> dict:
 
 
 def winepath(wine: str, host_path: str, env: dict) -> str:
-    wp = str(Path(wine).with_name("winepath"))
-    exe = wp if Path(wp).is_file() else "winepath"
+    """Wine's own winepath.exe (through the wine binary: the GPTK cask links no winepath)."""
     try:
-        r = subprocess.run([exe, "-w", host_path], capture_output=True, text=True, env=env, timeout=120)
+        r = subprocess.run([wine, "winepath", "-w", host_path], capture_output=True, text=True, env=env, timeout=120)
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         pass
-    return host_path                       # Wine also accepts Unix paths in most places
+    return host_path
 
 
 def translate_args(args: list[str], translate) -> list[str]:
     """Host paths among the tool's arguments become paths the tool can open: bare
-    arguments that exist on the host, and the value part of -I<dir>/-o<file>/-prefix <file>."""
-    out = []
-    for a in args:
-        if a.startswith(("-I", "-o")) and len(a) > 2 and Path(a[2:]).expanduser().exists():
+    arguments that exist on the host, and the value part of -I<dir>/-o<file>. A
+    separate `-I dir` is joined to `-Idir`, the only form mwccps2 accepts."""
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "-I" and i + 1 < len(args):
+            a, i = "-I" + args[i + 1], i + 1
+        if a.startswith(("-I", "-o")) and len(a) > 2 and "/" in a[2:] and Path(a[2:]).expanduser().exists():
             out.append(a[:2] + translate(str(Path(a[2:]).expanduser().resolve())))
-        elif Path(a).expanduser().exists() and not a.startswith("-"):
-            out.append(translate(str(Path(a).expanduser().resolve())))
+        elif "/" in a and not a.startswith("-") and Path(a).expanduser().exists():
+            out.append(translate(str(Path(a).expanduser().resolve())))      # plain names stay relative to the cwd
         else:
             out.append(a)
+        i += 1
     return out
 
 
-def run_native(wine: str, tools: Path, exe: str, args: list[str], prefix: Path | None) -> int:
+# ------------------------------------------------------------ the clock
+
+def shift_seconds(as_of: str) -> int:
+    """Seconds to add to the wall clock so that `now` reads as AS_OF (YYYY-MM-DD)."""
+    import datetime as dt
+    target = dt.datetime.strptime(as_of, "%Y-%m-%d").replace(hour=12, tzinfo=dt.timezone.utc)
+    return int(target.timestamp() - dt.datetime.now(dt.timezone.utc).timestamp())
+
+
+def native_shim() -> Path | None:
+    """tools/timeshift.c built as an x86_64 dyld interposer (the GPTK/Crossover Wine is
+    x86_64 under Rosetta); cached beside the kit's other scratch. None if clang fails."""
+    src = Path(__file__).with_name("timeshift.c")
+    out = Path.home() / ".cache" / "decomp-cw" / "timeshift.dylib"
+    if out.is_file() and out.stat().st_mtime >= src.stat().st_mtime:
+        return out
+    out.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(["clang", "-arch", "x86_64", "-dynamiclib", "-O2", "-o", str(out), str(src)],
+                       capture_output=True, text=True)
+    return out if r.returncode == 0 else None
+
+
+def run_native(wine: str, tools: Path, exe: str, args: list[str], prefix: Path | None, as_of: str | None) -> int:
     env = dict(os.environ)
     env.setdefault("WINEDEBUG", "-all")
     if prefix:
         env["WINEPREFIX"] = str(prefix)
+    if as_of:
+        shim = native_shim()
+        if not shim:
+            print("could not build tools/timeshift.c (clang -arch x86_64); --as-of needs it", file=sys.stderr)
+            return 2
+        env["DYLD_INSERT_LIBRARIES"] = str(shim)
+        env["TIMESHIFT_SECONDS"] = str(shift_seconds(as_of))
     targs = translate_args(args, lambda p: winepath(wine, p, env))
+    # mwccps2 -S and the link step run mwldps2 found through the Windows PATH
+    env["WINEPATH"] = winepath(wine, str(tools.resolve()), env) + (";" + env["WINEPATH"] if env.get("WINEPATH") else "")
     cmd = [wine, str(tools / exe)] + targs
     return subprocess.call(cmd, env=env, cwd=os.getcwd())
 
 
-def run_docker(image: str, tools: Path, exe: str, args: list[str]) -> int:
+def run_docker(image: str, tools: Path, exe: str, args: list[str], as_of: str | None) -> int:
     """Mount the tools directory at /cw/tools, the working directory at /cw/work, and
     every other host path that appears as an argument under /cw/pN; run under
     `wineserver -p` so one boot serves the whole invocation."""
@@ -151,7 +186,11 @@ def run_docker(image: str, tools: Path, exe: str, args: list[str]) -> int:
     targs = translate_args(args, translate)
     for host, box in extra.items():
         mounts += ["-v", f"{host}:{box}:ro"]
-    inner = "export WINEDEBUG=-all WINEPREFIX=/wine; wineserver -p; cd /cw/work; wine /cw/tools/%s %s; rc=$?; wineserver -k >/dev/null 2>&1; exit $rc" % (
+    clock = ""
+    if as_of:
+        # libfaketime for the i386 wine of the image (apt: libfaketime:i386); absolute date form
+        clock = f"export LD_PRELOAD=/usr/lib/i386-linux-gnu/faketime/libfaketime.so.1 FAKETIME='@{as_of} 12:00:00'; "
+    inner = clock + "export WINEDEBUG=-all WINEPREFIX=/wine WINEPATH='Z:\\cw\\tools'; wineserver -p; cd /cw/work; wine /cw/tools/%s %s; rc=$?; wineserver -k >/dev/null 2>&1; exit $rc" % (
         exe, " ".join(_sh_quote(a) for a in targs))
     cmd = ["docker", "run", "--rm", "--platform", "linux/amd64"] + mounts + [image, "sh", "-c", inner]
     return subprocess.call(cmd)
@@ -167,7 +206,10 @@ def self_test() -> int:
     tmp = Path(__file__).resolve()
     out = translate_args([str(tmp), "-I" + str(tmp.parent), "-o", "new.o"], lambda p: "T:" + p)
     checks["translate-existing"] = out[0] == "T:" + str(tmp) and out[1] == "-IT:" + str(tmp.parent) and out[2:] == ["-o", "new.o"]
+    checks["relative-untouched"] = translate_args(["t1.c", "-o", "t1.s"], lambda p: "T:" + p) == ["t1.c", "-o", "t1.s"]
     checks["quote"] = _sh_quote("a b'c") == "'a b'\"'\"'c'"
+    checks["join-I"] = translate_args(["-I", "nowhere", "x.c"], lambda p: p)[:1] == ["-Inowhere"]
+    checks["shift"] = abs(shift_seconds("2002-06-01") + (__import__("time").time() - 1022932800)) < 86400
     checks["tools-map"] = TOOLS["mwccps2"] == "mwccps2.exe" and TOOLS["asm"] == "asm_r5900_elf.exe"
     c = choose("auto")
     checks["choose-shape"] = set(c) == {"runner", "wine", "image", "why", "ok"}
@@ -182,6 +224,10 @@ def main() -> int:
                     help="directory with mwccps2.exe etc. (default $CW_TOOLS or ~/cwps2/3.04)")
     ap.add_argument("--runner", choices=("auto", "native", "docker"), default="auto")
     ap.add_argument("--prefix", type=Path, help="WINEPREFIX for a native run (default: Wine's)")
+    ap.add_argument("--as-of", metavar="YYYY-MM-DD",
+                    help="run the tool under a wall clock set to this date (tools/timeshift.c interposer on a native "
+                         "Wine, libfaketime in the docker image). The R3.04 license.dat's PS2 features expired "
+                         "18-nov-2002; a date before that lets the shipped evaluation license pass FLEXlm's check")
     ap.add_argument("--which", action="store_true", help="print the runner that would be used and exit")
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("tool", nargs="?", help="mwccps2 | mwldps2 | asm (asm_r5900_elf)")
@@ -204,8 +250,8 @@ def main() -> int:
         return 2
     args = a.args[1:] if a.args[:1] == ["--"] else a.args
     if c["runner"] == "native":
-        return run_native(c["wine"], a.tools, exe, args, a.prefix)
-    return run_docker(c["image"], a.tools, exe, args)
+        return run_native(c["wine"], a.tools, exe, args, a.prefix, a.as_of)
+    return run_docker(c["image"], a.tools, exe, args, a.as_of)
 
 
 if __name__ == "__main__":

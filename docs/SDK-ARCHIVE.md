@@ -151,6 +151,26 @@ PS1 product):
   `wineserver -p` per invocation and the image carries a booted prefix.
   The tools expect `license.dat` beside them; the R3.04 installer's file
   licenses the PS2 plugins only until 18-nov-2002 (FLEXlm, `lmgr326b.dll`).
+- **It runs, and it compiles (2026-10-31, late).** Through the Game Porting
+  Toolkit Wine on this Mac all three compilers print their banners (3.0 "Runtime
+  Built Nov 26 2001", 3.0.1 "Jan 23 2002", 3.0 build 22 "Sep 26 2002") and,
+  under `cw_run.py --as-of 2002-06-01`, compile C to ELF objects whose
+  `.comment` is `MW MIPS C Compiler (2.4.1.01)`, one `.text` per function plus
+  a `.mwcats` section each, flags `NOREORDER ISA 3 eabi64 5900`. A non-leaf
+  function at `-O2` opens with `addiu sp,-128; sd ra; sq s4..s0` at a 16-byte
+  stride and `swc1 $f20`: the `sq`/16 census signature of Silent Hill 2 and
+  Yakuza, from the compiler itself. 3.0 and 3.04 differ visibly (3.0 calls
+  `fptosi` where 3.04 inlines `cvt.w.s`; 3.0 zero-initialises a struct with an
+  `lq`/`sq` from a literal where 3.04 calls `__clear`), so the release matters
+  for a match. What the tool needs: `-I<dir>` joined (a separate `-I dir` is a
+  usage error), `mwldps2` on Wine's PATH for `-S` (the disassembly is the
+  linker's), `MWCIncludes` set or a warning. **The license:** compiling needs
+  the FLEXlm feature `Win32_Plugins_MIPS_PS2`, present only in the R3.04
+  installer's `license.dat` and expired 18-nov-2002 (error -10,32); `--as-of`
+  runs the tool under a clock before that date (a dyld interposer on the
+  host's `gettimeofday`/`clock_gettime`/`time`, `tools/timeshift.c`; `libfaketime`
+  in the docker image). No key is forged and no binary is patched; the R3.0
+  and R3.01 directories use a copy of the R3.04 file.
 - **The `.comment` string `MW MIPS C Compiler (2.4.1.01)` is constant** across
   ccps2_mips 2.4.5.0048 (R3.0, Nov 2001), 2.4.5.0051 (R3.01, Jan 2002) and
   3.0.0 Build 22 (R3.04, Sep 2002): it dates a title to CodeWarrior for PS2,

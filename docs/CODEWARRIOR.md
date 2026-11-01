@@ -296,9 +296,11 @@ from the release notes, which lag them.
 
 The PS1 discs give no PS2 compiler. CodeWarrior for PlayStation 2 R3.0, 3.01
 and 3.04 then surfaced (`docs/SDK-ARCHIVE.md` §4) with `mwccps2.exe`, a
-command-line Win32 compiler, so a CodeWarrior lane is possible in principle
-(Wine in a container); it has not been run, and until it is, the kit's
-matching tools cover the ee-gcc minority of a CodeWarrior title only (414 of
+command-line Win32 compiler, and `tools/cw_run.py` runs it on this Mac through
+the Game Porting Toolkit Wine (or the kit's docker image): it compiles, and its
+prologues are the `sq`/16 shape of the corpus. A judged CodeWarrior lane (a
+verifier that compiles with it and byte-compares) is the next step; until it
+exists the kit's matching tools cover the ee-gcc minority of a CodeWarrior title only (414 of
 2,514 prologues in SH2's main executable, 1,844 of 5,523 in Yakuza's
 `MAIN.BIN`, the Sony and CRI libraries). Of the three things this file said to
 look for first, two are now in hand (the plugin versions and the version-3
