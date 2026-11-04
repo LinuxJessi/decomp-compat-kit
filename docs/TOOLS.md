@@ -263,7 +263,9 @@ $K patch   ~/.cache/decomp-match/someFunction [--against newer/file.c]
 Environment: `DECOMP_UPSTREAM` (the decomp checkout), `DECOMP_GAME_DIR` and
 `DECOMP_BINARY` (the original's folder and file name; the name also selects the
 `symbols.csv` rows), `DECOMP_UNIT`, `EE_ROOTFS`, `DECOMP_TOOLCHAINS`,
-`DECOMP_SANDBOXES` (default `~/.cache/decomp-match`).
+`DECOMP_SANDBOXES` (default `~/.cache/decomp-match`), `DECOMP_IMAGE` (the build
+container, default `debian:bookworm-slim`; a contract assembler built against a newer
+glibc needs a newer image).
 
 - `init` locates the function by its definition (the `INCLUDE_ASM` stub or a C
   body), copies the sources into a sandbox, records compiler, author, commits,

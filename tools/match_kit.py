@@ -47,7 +47,8 @@ the `binary` column of symbols.csv to use), DECOMP_UNIT (the upstream unit, defa
 main), EE_ROOTFS (stock toolchain rootfs), DECOMP_TOOLCHAINS (contract tools; default
 <upstream>/.work/toolchains; the layout inside comes from the upstream's
 config/toolchain-identity.json or DECOMP_CONTRACT_CC1/DECOMP_CONTRACT_AS),
-DECOMP_SANDBOXES (default ~/.cache/decomp-match; colima only mounts paths under $HOME). rabbitizer (pip, the
+DECOMP_SANDBOXES (default ~/.cache/decomp-match; colima only mounts paths under $HOME),
+DECOMP_IMAGE (the build container; default: verify_decomp.py's). rabbitizer (pip, the
 kit venv) is required by `init`: without it the probe cannot read the original code.
 """
 import argparse
@@ -75,6 +76,7 @@ SANDBOXES = Path(os.environ.get('DECOMP_SANDBOXES', Path.home() / '.cache' / 'de
 UNIT = os.environ.get('DECOMP_UNIT', 'main')                       # the upstream unit the sandbox judges
 BINARY = os.environ.get('DECOMP_BINARY', 'SLUS_204.69')             # the original ELF's file name in DECOMP_GAME_DIR
 RESIDENT = os.environ.get('DECOMP_RESIDENT', 'SLUS_204.69')         # the always-loaded image an overlay calls into
+DOCKER_IMAGE = os.environ.get('DECOMP_IMAGE')                       # verify_decomp.py --image; unset keeps its default
 UNVERIFIABLE_STOP = 2
 NO_PROGRESS_DEFAULT = 4
 CARD_LIMIT = 2048
@@ -687,6 +689,8 @@ def judge(sandbox, budget, compiler=None):
             '--rootfs', str(ROOTFS), '--work', str(work), '--out', str(report), '-v', '--compiler', compiler]
     if compiler == 'contract':
         argv += ['--toolchains', str(budget.get('toolchains') or toolchains_dir())]
+    if DOCKER_IMAGE:
+        argv += ['--image', DOCKER_IMAGE]
     run = subprocess.run(argv, capture_output=True, text=True)
     out = dict(verdict='NOT_COMPILED', detail=[], tu_matches=None, rows=[], diff_words=None,
                ours_sha256=None, compiler=compiler, size_ours=None, size_orig=None, undeclared=[])

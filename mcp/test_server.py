@@ -295,5 +295,32 @@ class CompilerFamily(unittest.TestCase):
         self.assertIn("overlayID", text)
         self.assertIn("991111-01", server.doc_resource("sdk-archive"))
 
+class SandboxImage(unittest.TestCase):
+    """DECOMP_IMAGE reaches the verifier from the sandbox tools too (issue #2): match_init and
+    match_check build through match_kit.judge, not through the server's own verify argv."""
+
+    def argv_with(self, image):
+        spec = importlib.util.spec_from_file_location("match_kit_image", HERE.parent / "tools" / "match_kit.py")
+        mk = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("DECOMP_IMAGE", None)
+            if image:
+                os.environ["DECOMP_IMAGE"] = image
+            spec.loader.exec_module(mk)
+        tooling_failure = subprocess.CompletedProcess([], 2, "", "stopped by the test")
+        with mock.patch.object(mk, "binary", return_value=Path("/nowhere/original")), \
+             mock.patch.object(mk.subprocess, "run", return_value=tooling_failure) as run:
+            result = mk.judge(Path(tempfile.mkdtemp(prefix="sb-")), dict(tu="main/tu000"), compiler="stock")
+        self.assertEqual(result["verdict"], "UNVERIFIABLE")
+        return run.call_args.args[0]
+
+    def test_image_is_passed(self):
+        argv = self.argv_with("debian:trixie-slim")
+        self.assertEqual(argv[argv.index("--image") + 1], "debian:trixie-slim")
+
+    def test_unset_keeps_the_verifier_default(self):
+        self.assertNotIn("--image", self.argv_with(None))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
