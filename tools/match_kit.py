@@ -728,7 +728,7 @@ def cmd_init(args):
         if (sandbox / 'upstream' / rel).is_file():
             (sandbox / 'base' / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(sandbox / 'upstream' / rel, sandbox / 'base' / rel)
-    budget = dict(function=args.name, tu=tu, path=path, forms_max=args.forms, forms=[], attempts=[],
+    budget = dict(function=args.name, tu=tu, unit=UNIT, path=path, forms_max=args.forms, forms=[], attempts=[],
                   baseline_matches=None, upstream=str(UPSTREAM), created=time.strftime('%Y-%m-%dT%H:%M:%S'),
                   compiler=compiler, toolchains=str(toolchains_dir()) if compiler == 'contract' else None,
                   author=args.author, kit_commit=git_short(KIT), upstream_commit=git_short(UPSTREAM),
@@ -763,6 +763,9 @@ def judge(sandbox, budget, compiler=None):
     """Compile the TU with the chosen toolchain; return the verdict for the budget's function."""
     vd = verifier()
     compiler = compiler_of(budget, compiler)
+    if budget.get('unit', UNIT) != UNIT:          # judged against another unit's original, any verdict would be wrong
+        sys.exit(f"this sandbox was opened for unit {budget['unit']!r}; run with DECOMP_UNIT={budget['unit']} "
+                 f"(now {UNIT!r})")
     image_path = binary()
     work, report = sandbox / 'work', sandbox / 'last.json'
     report.unlink(missing_ok=True)                # the verifier wipes work/obj per run: whatever exists after is this run's
