@@ -63,6 +63,21 @@ flattened. It writes `<name>.image` plus a JSON sidecar that
 MGS3 round-trips byte-identical to an independent unpack; 55 PS2 overlay
 records agree with the layout (`docs/CODEWARRIOR.md` §2).
 
+## Search: `find_symbols.py`
+
+```sh
+tools/find_symbols.py GAME.iso DEMO.iso --json report.json
+```
+
+Before reconstructing names for a stripped game, look once through everything on the disc.
+The scan reads the image byte by byte, so it also sees what no directory lists: every
+32-bit little-endian MIPS ELF header at any offset, what each carries (named symbols,
+`.mdebug`, stabs, DWARF), and text only a toolchain writes (`gcc2_compiled.`, GNU ld map
+headings), each with the file it lies in. The one-entry symbol table every SCE module has
+is not reported as a find. It does not see inside compressed archive members, and an ELF
+stored in pieces is reported unreadable rather than guessed at; the tool's help lists the
+limits. A 4.7 GB image takes about 13 seconds.
+
 ## Name: `dump_symbols.py`, `transfer_symbols.py`, `sdk_donor.py`, `symbols_to_splat.py`
 
 ```sh
@@ -78,6 +93,13 @@ tools/symbols_to_splat.py --all --locals --outdir symbols/splat
 a directory to one CSV (`binary,name,va,size,type,bind,shndx`). Xenosaga I's
 six binaries give 15,132 symbols; the kit ships them under `symbols/`.
 
+It also reads `.mdebug`, the ECOFF symbol data older GNU toolchains wrote, which can
+survive in an IOP module whose game executable is stripped and which names the source
+files and the file-local statics: `--recursive` takes modules in sub-directories,
+`--mdebug-out FILE` writes `binary,file,kind,name,value` rows (a row with an empty `file`
+is an external). Checked on Xenosaga II's `KORGIVAG.IRX`: 239 procedures agreeing with
+`.symtab` by name and address, 91 statics, 29 labels, 4 source files.
+
 `transfer_symbols.py` packages a method used twice by hand before it existed:
 every function of an unstripped donor, with the relocatable fields masked
 (`j`/`jal` targets, `lui`, load/store/`addiu`/`ori` immediates, branch
@@ -89,6 +111,15 @@ script it reproduces 424 under `strict` and 428 of 428 under `loose`, in
 0.7 s; against Final Fantasy X it names 196 functions. Multiple hits
 (identical thunks) and donors that share a masked body are reported, never
 guessed; `--splat` emits only the clean ones unless `--all-hits`.
+
+`--sibling` is for an acceptor that is another build of the same program (a demo,
+a prototype, another region). Link order is then preserved, so the tool may use it:
+unique hits outside the longest order-preserving chain are marked ambiguous
+(`<order>`: a body that changed, found again elsewhere), and a multi-hit or shared
+body is placed when exactly one of its hits lies between its nearest placed
+neighbours (at their shift, when both moved alike). Xenosaga II retail → the
+*Xenosaga Freaks* demo: unique placements 4,577 → 6,316 (main) and 774 → 1,070 (OV01),
+zero order inversions.
 
 `sdk_donor.py` makes a donor out of Sony's own SDK static libraries
 (`sce/ee/lib/*.a`, unstripped relocatable objects): every executable section
@@ -290,6 +321,122 @@ The rules came out of running language models against it
 (`docs/MATCHING-PLAYBOOK.md` §1): the tool decides exactness; a worker's
 "verified manually" is not evidence; byte identity is necessary, not
 sufficient.
+
+## Targets: a decomp that is not xsg-i-decomp
+
+`verify_decomp.py`, `match_kit.py`, `ledger.py`, `port_check.py` and the MCP server
+were written against the Xenosaga I upstream's config layout. A **target manifest**
+(`decomp-target/1`, JSON, next to the sources) describes any other tree instead; the
+xsg-i-decomp layout stays the other adapter (`--upstream`), unchanged.
+
+```json
+{"schema": "decomp-target/1", "name": "Xenosaga Episode II (USA) SLUS_208.92",
+ "game_dir": "ELF", "symbols": "symbols/xs2.csv", "resident": "SLUS_208.92",
+ "units": {"main": {"binary": "SLUS_208.92"}, "ov01": {"binary": "OV01.OVL"}},
+ "include": ["src/include", "src/main"], "defines": [],
+ "toolchains": "~/.cache/xs2-toolchains",
+ "contracts": {"c296-g": {"cc1": "ee-gcc2.96-realconv-lp7-fsv12-v1/bin/cc1",
+                          "as": "ee-legacy-binutils-la29-vsqrt-nolabel-laimm-swap-v1/bin/ee-as",
+                          "cc1_flags": "-fno-builtin", "as_flags": "-EL -m5900 -mabi=eabi -g -I ."}},
+ "default_contract": "c296-g", "ledger": "src/matched.tsv",
+ "tus": [{"id": "main/xgl_menu", "unit": "main", "path": "src/main/xgl_menu.c", "flags": ["-O2", "-G8"],
+          "contract": "c296-g"}]}
+```
+
+Paths are relative to the manifest (`~` and `$VARS` expand). Each TU names its
+contract, so one tree can mix assemblers or cc1 flags per TU (Xenosaga I's m_math TU is
+`-fno-optimize-sibling-calls`; its game C needs the swap-mask GAS with `-g`, which keeps
+delay slots unfilled). `verify_decomp.py --target M` (or `DECOMP_TARGET=M`) builds one
+docker run per contract group. `match_kit.py` and the MCP server read `DECOMP_TARGET`
+and take the upstream root, originals, the unit's binary, the resident image, the symbol
+table and the toolchains from it (each still overridable by its own variable);
+`DECOMP_SYMBOLS` overrides the symbol table in either mode. A match sandbox is a copy of
+the target's sources with a manifest pointing back at the originals.
+
+A manifest may live outside the tree it describes: `"root"` names the source tree (TU
+paths and include roots are then relative to it, everything else to the manifest), so a
+read-only checkout needs nothing written into it. `tools/upstream_target.py --upstream TREE
+--game-dir ORIGINALS --symbols-out S.csv --target-out T.json` writes such a manifest and
+its symbol table from a splat-based checkout that has no ELF symbols (OpokXeno/xsg-ii-decomp:
+`config/symbols/<unit>.txt`, `estimated-functions.json`, `data-names.json`, the per-TU
+flags and assembler options of `config/objects/*.compile.json`, the tool paths of
+`config/toolchain-identity.json`); `root`, `game_dir` and `toolchains` are written as
+`$DECOMP_UPSTREAM`, `$DECOMP_GAME_DIR` and `$DECOMP_TOOLCHAINS`. Rerun it after a rename.
+
+In target mode only (the upstream path is byte-for-byte the old behaviour):
+
+- **Annotations in a TU's comments** (the Xenosaga III ledger convention): `@addr NAME 0xVA`
+  names a symbol for this TU only (file-local statics, a name the table lacks),
+  `@cflags -G0 -fno-strict-aliasing` overrides the manifest's flags, `@rodata 0xA 0xB ...`
+  gives the TU's `.rodata` objects in emission order, `@data/@sdata/@bss/@sbss 0xVA` a
+  section base. Ghidra-style names (`FUN_00186448`, `DAT_00645820`) and splat's
+  (`func_00A9CC70`, `D_0061B2D0`, `jtbl_0068DCB0`) resolve to the address they spell.
+- **Content-verified data references.** A reference into the original's initialised data
+  (`.rodata` strings and floats, `.lit4`, `.data`, `.sdata`) needs no name: the address the
+  original encodes at that site is accepted only when the original holds the object's bytes
+  there (relocated words masked). A different object there forces a difference, never a
+  match. Uninitialised data (`.bss`, `.sbss`) needs a name. `R_MIPS_LITERAL` is resolved
+  the same way.
+- **HI16/LO16 pairing by instruction offset.** The `-g` assembler does not keep a HI16 next
+  to its LO16 in `.rel.text` (it can list it after a later function's LO16); pairing in
+  table order paired `%hi` with the wrong `%lo` on Xenosaga II. A `%lo` that shares another's
+  `%hi` resolves through its governing HI16.
+
+## Ledger: `ledger.py`
+
+The Xenosaga III paradigm as a kit feature: a TSV of functions that are **Tier A**
+(byte-identical with every relocation applied from the table and the TU's annotations,
+nothing masked, same length), and a command that re-proves every row.
+
+```sh
+export DECOMP_TARGET=path/to/decomp-target.json
+tools/ledger.py check src/main/xgl_menu.c [--add]   # one TU: every function's verdict
+tools/ledger.py promote report.json                  # the Tier-A functions of a target verify --out
+tools/ledger.py all                                  # re-verify every row; exit 0 only if all hold
+tools/ledger.py list
+tools/ledger.py sibling NAME [--remap] [--harvest DIR]  # every row against another build
+```
+
+`sibling` reads the manifest's `siblings` block, `{NAME: {note, units: {UNIT: {binary,
+map}}}}` (binary under `game_dir`, map a `transfer_symbols.py --sibling` TSV, rebuilt with
+`--remap`), compiles the TUs holding ledger rows and runs `port_check.py` against that build:
+each row must be `identical` there with relocated fields masked. A row that is not either
+changed between the builds or matched by luck. Measured on Xenosaga II against the
+*Xenosaga Freaks* demo (2026-11-05): 141 of 141 identical, ~20 s.
+
+Columns: `unit addr function bytes source lane verified` (the Xenosaga III ledger's five
+plus the compile lane and the date). Measured on Xenosaga II (2026-11-05): 141 rows, `all`
+re-proves 141 of 141.
+
+## Cross-game: `port_check.py`, `harvest_relocs.py`
+
+Two games of one studio share engine code. `transfer_symbols.py` finds where game A's
+function sits in game B by shape; `port_check.py` asks whether A's *source* reproduces B:
+
+```sh
+tools/port_check.py --upstream ~/src/xsg-i-decomp --map xs1_to_xs2.tsv --acceptor SLUS_208.92 \
+    --compiler contract --toolchains DIR --contract-name ee-tu-c296-G8-g \
+    --harvest xs2_harvest.csv --harvest-accept immediate --out port.json -v
+tools/port_check.py --target xs2/decomp-target.json --map xs2_to_xs3.tsv --acceptor SLUS_213.89
+```
+
+It compiles A's TUs (the upstream's TU list or a target's), places each mapped function at
+its B address (a `transfer_symbols.py` TSV, single-address rows), and compares word by
+word masking only the relocated **field** (j/jal: 26 bits; HI16, LO16, GPREL16, LITERAL:
+16 bits; anything else the whole word, reported). Classes: `identical`, `immediate` (same
+size, every differing word an I-type whose opcode and registers agree: a moved struct
+field, a changed constant), `size-diff`, `other`.
+
+`harvest_relocs.py` (run by `--harvest`, or standalone on objects) reads every relocated
+field of the identical functions back out of B: the address B's linker gave each symbol.
+Globals by name, statics by name and TU, section bases per TU; a symbol referenced from
+several sites is cross-checked and a disagreement is reported, never resolved.
+`--harvest-accept immediate` also reads the immediate-only functions, whose relocated
+fields are unaffected. Measured, Xenosaga I's C against Xenosaga II: 159 functions placed;
+134 identical, 24 immediate, 1 size-diff (a static name collision), 0 other under the
+`-g` swap-assembler contract (126 / 24 / 9 under the kit-default pair, the 8 extra being
+m_math's inline-asm functions whose delay slots only `-g` leaves unfilled); the harvest
+read 220 names from 158 functions, 218 with one address, 98 confirmed by more than one site.
 
 ## Compile with CodeWarrior: `cw_run.py`
 

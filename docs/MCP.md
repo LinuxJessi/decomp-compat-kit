@@ -77,6 +77,19 @@ the worker brief is a prompt (`match_one_function`).
   an overlay's external calls) and, through the family check, says honestly
   when a binary is outside what the kit can judge.
 
+## Pointing it at another game
+
+The server is configured by environment only. For the Xenosaga I upstream that is
+`DECOMP_UPSTREAM` and friends; for any other tree, `DECOMP_TARGET` names a
+`decomp-target/1` manifest (`TOOLS.md` "Targets"), and the server takes the
+originals, the unit's binary, the symbol table and the contract toolchains from it.
+`DECOMP_SYMBOLS` overrides the symbol table either way. Measured on Xenosaga II
+(2026-11-05, in-process with the SDK `Client`): `doctor` reported the target (3 units,
+28 TUs, 3 contracts); `name_lookup` and `triage_function` answered from its table;
+`match_init` opened a sandbox for `xglFlagsGet` (TU `main/xgl_flags`, baseline 4);
+`match_check` judged the unchanged Xenosaga I source `MATCH` under the contract lane;
+`verify_tu` and `match_list` answered.
+
 ## What it is not
 
 It is not a decompiler and it does not write C. It does not run the game. It

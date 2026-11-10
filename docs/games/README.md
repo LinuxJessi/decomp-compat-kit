@@ -9,6 +9,7 @@ summary is `../CORPUS.md`.
 | Game | Serial | Year | Compiler | Status in the kit |
 |---|---|---|---|---|
 | [Xenosaga Episode I](xenosaga-1.md) | SLUS_204.69 | 2002 | SCE ee-gcc 2.96 | **reference target**: proven by byte-identical compiles; symbols shipped; the verify and match lanes were built on it |
+| [Xenosaga Episode II](xenosaga-2.md) | SLUS_208.92 | 2004 | SCE ee-gcc 2.96 | **proven**: 141 functions Tier A with relocations applied (136 compiled from Xenosaga I's C); the target-manifest, ledger and port lanes were built on it |
 | [Xenosaga Episode III](xenosaga-3.md) | SLUS_213.89 | 2006 | SCE ee-gcc 2.96 | proven on one overlay; 428 names transferred from Xenosaga I |
 | [Final Fantasy X](final-fantasy-x.md) | SLUS_203.12 | 2001 | SCE ee-gcc 2.9-ee-991111 family | fingerprint lead; Sony's own 2000 toolchain is now in hand and probed |
 | [Metal Gear Solid 3](metal-gear-solid-3.md) | SLUS_209.15 | 2004 | SCE ee-gcc 3.x | fingerprint lead; boot ELF is a zlib stub, unwrapped byte-exact |

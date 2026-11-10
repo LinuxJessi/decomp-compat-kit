@@ -127,7 +127,7 @@ temp file are in `server.py`, re-tested over stdio against the same tree):
   an empty `/toolchains`; cc1 fails with `cannot open shared object file` (rc 127)
   and every TU reports BUILD FAILED. `doctor` says the toolchains are fine because
   its check is a host-side `is_dir()`. Point `DECOMP_TOOLCHAINS` at a copy under
-  `/Users/jessi/Desktop`. Fixed: `doctor` now runs `docker_sees()` (the pinned cc1 must
+  `$HOME/Desktop`. Fixed: `doctor` now runs `docker_sees()` (the pinned cc1 must
   be listable through the mount, `visible_in_docker`), and `verify_tu`, `verify_unit_start`
   and `match_init` refuse a contract run up front with the same reason (`contract_blocker()`).
 - `match_write_function` on an existing definition re-inserts `declarations`
@@ -196,6 +196,96 @@ the same bind. Tests: `mcp/test_server.py` (13, no docker).
   definition, unused defines/prototypes, gotos, raw masks, long lines), optionally
   only for what the file adds over a base copy. The compiler-warning diff against a
   base build stays in the pack's `kit/public-lane/prepush-check.py`.
+
+## Third run (2026-11-03): OV01 on Opok's master d31fadb
+
+`DECOMP_UPSTREAM` is the pack checkout, merged with Opok's master `d31fadb` (lane 2's
+72 OV01 functions merged upstream, his lq/sq and VU0 macro headers, fsv12 pin). A second
+Claude Code registration `ps2decomp-ov01` (`DECOMP_UNIT=ov01`, `DECOMP_BINARY=OV01.OVL`)
+is needed for the overlay: the default server verifies MAIN against `symbols/symbols.csv`
+and answers `unknown symbol` for an OV01 TU. With the overlay configuration `verify_tu
+ov01/tu017` (m_cam) is 21/21 identical, 9 unverifiable, `contract cc1 matches the
+upstream pin`. TU ids are `ov01/tuNNN` (config/tu/ov01/), not source file names.
+
+## Xenosaga II (2026-11-10): Opok's xsg-ii-decomp as a target
+
+OpokXeno/xsg-ii-decomp (SLUS_208.92, OV01.OVL, OV02.OVL) has no ELF symbol table, no
+`config/tu-build.json`, a `main.compile.json` whose C TUs say `mode: asm` and carry `-O0`
+or `-O2` and an assembler option (`-g`) per TU, and sources written against splat's auto
+names (`func_A9CC70`, `D_61B2D0`). It is served through a generated target manifest, not
+through the Xenosaga I adapter.
+
+What changed (nothing is keyed on the game; the Xenosaga I path is untouched):
+
+- `tools/upstream_target.py` (new) reads a checkout's `config/symbols/` and
+  `config/objects/*.compile.json` + `config/toolchain-identity.json` and writes
+  `symbols/xs2-symbols.csv` (9,868 rows: 8,909 functions with the upstream's estimated
+  sizes, 950 data labels of size 0, the libgcc helper names, `_gp` from the ELF's
+  `.reginfo`) and `symbols/xs2-target.json` (353 C TUs, one contract: fsv12 cc1 + the
+  swap-mask assembler with `-g`; `-O0`/`-G` stay per-TU flags). Assembler-local labels the
+  upstream lists as data names (`$LC0`) are left out: with them every TU's first `.rodata`
+  constant resolved to one address and nine functions differed. Rebuild both after a rename:
+
+  ```sh
+  tools/upstream_target.py --upstream ~/kosmos/xsg/.work/xsg2 --game-dir ~/kosmos/xsg/.work/xs2-game \
+      --symbols-out symbols/xs2-symbols.csv --target-out symbols/xs2-target.json
+  ```
+- `verify_decomp.py`: a target manifest may name its source tree with `root` (the manifest
+  then lives outside a read-only checkout; a sandbox copy drops it), and splat's auto names
+  resolve to the address they spell next to Ghidra's (target mode only).
+- `match_kit.py`: the `init` probe no longer refuses a call into another image (an overlay
+  function called from the main executable) in target mode; the verifier resolves it.
+- `server.py`: `doctor` checks each target contract's tools against the upstream's cc1 pin and
+  describes the target manifest as such; `verify_tu` / `verify_unit_start` compare a unit
+  other than the configured one with that unit's own original (`ov01/tu000` with OV01.OVL).
+
+Registration (a third server; `DECOMP_TARGET` is what selects the adapter, the manifest
+expands `$DECOMP_UPSTREAM`, `$DECOMP_GAME_DIR` and `$DECOMP_TOOLCHAINS`):
+
+```sh
+claude mcp add --scope user ps2decomp-xs2 \
+  -e "DECOMP_TARGET=$HOME/Desktop/decomp-compat-kit/symbols/xs2-target.json" \
+  -e "DECOMP_UPSTREAM=$HOME/kosmos/xsg/.work/xsg2" \
+  -e "DECOMP_GAME_DIR=$HOME/kosmos/xsg/.work/xs2-game" \
+  -e "DECOMP_BINARY=SLUS_208.92" -e "DECOMP_RESIDENT=SLUS_208.92" \
+  -e "DECOMP_SYMBOLS=$HOME/Desktop/decomp-compat-kit/symbols/xs2-symbols.csv" \
+  -e "DECOMP_TOOLCHAINS=$HOME/kosmos/xsg/.work/toolchains-gate" \
+  -e "EE_ROOTFS=$HOME/xs3-match/rootfs" \
+  -e "DECOMP_SANDBOXES=$HOME/.cache/decomp-match-xs2" \
+  -- $HOME/Desktop/decomp-compat-kit/.venv/bin/python $HOME/Desktop/decomp-compat-kit/mcp/server.py
+```
+
+Verified at upstream `ba20cba`, contract compiler, on a scratch copy and (doctor, `verify_tu`)
+on the registered checkout, which stays untouched:
+
+```
+main   identical: 1985/1985  (100.0%)   differing: 0   unverifiable: 2   unknown symbol: 0   build failures: 0
+ov01   identical: 655/655  (100.0%)   differing: 0   unverifiable: 0   unknown symbol: 0   build failures: 0
+ov02   identical: 8/8  (100.0%)   differing: 0   unverifiable: 0   unknown symbol: 0   build failures: 0
+```
+
+(235 + 82 + 3 TUs built, 14 of them `-O0`; 30 listed TUs have no C file yet.) Over stdio with
+the SDK `Client`: `doctor` `ok: true` (`visible_in_docker: true` for the toolchains under
+`~/kosmos`, contract `current: true` against pin `58a63b84ed438510`); `name_lookup` by name
+and by address; `match_init enepc_001F6680` with `compiler=contract` (`baseline_matches: 1`,
+the TU's one C function); `match_card`, `match_disasm`; `verify_tu main/tu073` `match=1`,
+`main/tu054` `match=28`, `ov01/tu000` `match=8`; and on `Resigne` one throwaway form through
+`match_write_function` + `match_check`: `FORM 1/30: UNEXPLAINED   TU main/tu073 matches 1
+(baseline 1)   compiler=contract`, 14/51 words, three `offset-cast` cheats flagged. Both proof
+sandboxes were removed afterwards.
+
+Still open:
+
+- `MemcardTest` (main/tu060) and `gifStateEffectFrame` (main/tu136) are unverifiable:
+  `.rodata HI16 without paired LO16` (the offset pairing finds no `%lo` after the `%hi` in
+  the same function).
+- Function sizes are the upstream's estimates and every data label has size 0, so a card
+  names a global only at its exact address, and an access into unnamed `.bss` is refused at
+  `init` until the upstream names it.
+- A call from the main executable into an overlay is shown by address (`func_A9F0A8`) in
+  `match_disasm` and the card, not by the overlay's name: OV01 and OV02 share one load window.
+- The card has no matched siblings and no state: this tree has no per-TU ledger.
+- The table and the manifest are snapshots: rerun `upstream_target.py` after a pull.
 
 ## Not yet
 

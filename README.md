@@ -48,12 +48,14 @@ the kit has a tool for each. The long reference is [`docs/TOOLS.md`](docs/TOOLS.
 | stage | tool | what it answers |
 |---|---|---|
 | **identify** | `fingerprint_elf.py`, `unwrap_image.py` | Which compiler built this image? Is this boot ELF a container? What does an overlay record say? |
-| **name** | `dump_symbols.py`, `transfer_symbols.py`, `sdk_donor.py`, `symbols_to_splat.py` | Which functions already have names, from an unstripped sibling or from Sony's SDK libraries? |
+| **name** | `find_symbols.py`, `dump_symbols.py`, `transfer_symbols.py`, `sdk_donor.py`, `symbols_to_splat.py` | Which functions already have names, from an unstripped sibling or from Sony's SDK libraries? |
 | **triage** | `triage.py` | How hard is each function, what does it call, was its TU built `-G0` or `-G8`? |
 | **probe** | `probe_toolchain.py` | What does the `cc1` + `ee-as` pair I hold do on the behaviours known to differ from retail? |
 | **verify** | `verify_decomp.py` | Does this decomp's C reproduce the bytes under a stock compiler, function by function, and what class is each miss? |
 | **match** | `match_kit.py` | One function at a time: evidence card, named disassembly, a verdict per attempt, no-progress stop, anti-cheat lint |
 | **compile** | `cw_run.py` | Run CodeWarrior for PS2's `mwccps2` on this machine, natively through Wine or in a container |
+| **ledger** | `ledger.py` | Which functions are byte-identical with every relocation applied, re-proved on demand (a target's `matched.tsv`) |
+| **port** | `port_check.py`, `harvest_relocs.py` | Does game A's decomp C reproduce game B's bytes, and where did B's linker put every symbol it names? |
 
 Measured results for each tool are in `docs/TOOLS.md`; the shape of a good
 result is the Xenosaga I case study there: 817 of 857 functions identical
@@ -69,13 +71,14 @@ was measured, which tools apply, what is open.
 | game | compiler | the kit's standing |
 |---|---|---|
 | [Xenosaga Episode I](docs/games/xenosaga-1.md) (2002) | SCE ee-gcc 2.96 | reference target, proven; symbols shipped |
+| [Xenosaga Episode II](docs/games/xenosaga-2.md) (2004) | SCE ee-gcc 2.96 | proven: 141 functions Tier A through a target manifest, 136 of them Episode I's C |
 | [Xenosaga Episode III](docs/games/xenosaga-3.md) (2006) | SCE ee-gcc 2.96 | proven on one overlay; names transferred from Episode I |
 | [Final Fantasy X](docs/games/final-fantasy-x.md) (2001) | SCE ee-gcc 2.9-ee-991111 family | lead; Sony's own 2000 toolchain staged and probed |
 | [Metal Gear Solid 3](docs/games/metal-gear-solid-3.md) (2004) | SCE ee-gcc 3.x | lead; zlib-stub boot ELF unwrapped byte-exact |
 | [Silent Hill 2](docs/games/silent-hill-2.md) (2001) | Metrowerks CodeWarrior for PS2 | identified; 54 overlay records read; compiler runs, no judged lane yet |
 | [Yakuza](docs/games/yakuza.md) (2006) | Metrowerks CodeWarrior for PS2 | identified; whole game is one overlay record behind a loader |
 
-The measured table across all six is [`docs/CORPUS.md`](docs/CORPUS.md). Two
+The measured table across all seven is [`docs/CORPUS.md`](docs/CORPUS.md). Two
 rules it forced: vendor strings before the register census (CodeWarrior saves
 like ProDG), and the compiler is a per-studio choice, not a per-region one.
 
