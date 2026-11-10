@@ -303,6 +303,9 @@ def strings_evidence(img: Image) -> dict:
     return out
 
 
+FLOAT_MIN_PROLOGUES, FLOAT_MIN_SITES = 50, 100       # below these the float-constant test abstains
+
+
 def census(img: Image) -> dict:
     c = dict(prologues=0, save_style=collections.Counter(), stride=collections.Counter(),
              sd_sp=0, sq_sp=0, sw_sp=0, lq=0, sq=0, div=0, divu=0, div_s=0, float_immediates=0,
@@ -367,6 +370,7 @@ def census(img: Image) -> dict:
 
 
 def verdict(img: Image, s: dict, c: dict, startup: dict | None = None) -> dict:
+    float_test = None
     reasons, footnotes = [], []
     if img.kind == "iop-module":
         return dict(compiler="IOP module (R3000, MIPS-I): EE heuristics skipped", confidence="n/a",
@@ -410,15 +414,26 @@ def verdict(img: Image, s: dict, c: dict, startup: dict | None = None) -> dict:
             reasons.append(startup["note"])
     elif dominant == "sd":
         gcc3 = s["mangling"]["itanium"] > s["mangling"]["old_gnu"] and s["mangling"]["itanium"] > 2
-        pool = c["float_pool_loads"] > 4 * max(1, c["float_immediates"])
+        # 2.96 forms a float constant as lui+mtc1; 3.x loads it from .rodata. lwc1 also reads
+        # struct fields and globals, so the pool count alone says nothing: what separates the
+        # two is how rare the immediates are among all float loads. Measured: 2.96 binaries
+        # 18-39 % immediates (Xenosaga I/II/III, FFX, stripped or not), ee-gcc 3.x 0.2 % (MGS3).
+        floats = c["float_pool_loads"] + c["float_immediates"]
+        enough = c["prologues"] >= FLOAT_MIN_PROLOGUES and floats >= FLOAT_MIN_SITES
+        pool = enough and c["float_immediates"] * 20 < floats
+        float_test = "abstains" if not enough else ("3.x-like" if pool else "2.96-like")
         stride_n = int(stride.split("/")[1]) if stride else 0
         if gcc3 or (pool and not s["gcc2_markers"] and not s["mangling"]["old_gnu"]):
-            name, conf = "SCE ee-gcc 3.x", "medium"
+            # the float idiom alone rests on one 3.x-labelled game (MGS3), itself labelled by
+            # this idiom: a lead for a per-function compile check, not an identification
+            name, conf = "SCE ee-gcc 3.x", ("medium" if gcc3 else "low")
             if gcc3:
                 reasons.append(f"Itanium mangling ({s['mangling']['itanium']} names)")
             if pool:
                 reasons.append(f"float constants loaded from .rodata ({c['float_pool_loads']}) rather than lui+mtc1 "
-                               f"({c['float_immediates']}): the 3.x idiom (2.96 forms them as immediates)")
+                               f"({c['float_immediates']}): the 3.x idiom (2.96 forms them as immediates). "
+                               "Unconfirmed: no independently identified 3.x binary is in the corpus, and a 2.96 "
+                               "body that reads floats but never writes a constant would look the same")
         elif stride_n == 16 and not s["gcc2_markers"]:
             name, conf = "SCE ee-gcc 2.9x, 1999 build (ee-gcc 2.9-991111: sd saves at a 16-byte stride)", "medium"
             reasons.append("sd saves at a 16-byte stride: the idiom-probe rig matched that to the 2.9-991111 build; "
@@ -431,6 +446,13 @@ def verdict(img: Image, s: dict, c: dict, startup: dict | None = None) -> dict:
                 reasons.append(f"old GNU C++ mangling, zero Itanium: {s['mangling']['old_gnu']} names")
             if c["float_immediates"]:
                 reasons.append(f"float constants as lui+mtc1 immediates: {c['float_immediates']} (ee-gcc 2.96 idiom)")
+            if not enough:
+                # markers and old GNU mangling name 2.x on their own; without them a small
+                # body has shown nothing that 3.x would not also show
+                if not s["gcc2_markers"] and not s["mangling"]["old_gnu"]:
+                    conf = "low"
+                reasons.append(f"too small to tell 2.96 from 3.x by float constants ({c['prologues']} prologues, "
+                               f"{floats} float loads): read the verdict of the executable it was linked with")
         reasons.insert(0, f"sd saves at {stride.split('/')[1] if stride else '?'}-byte stride dominate ({style.get('sd')} of {total} prologues)")
         if c["div"] + c["divu"]:
             reasons.append(f"hardware div/divu {c['div']}/{c['divu']}, div.s {c['div_s']}: real divides, no magic-multiply "
@@ -461,7 +483,9 @@ def verdict(img: Image, s: dict, c: dict, startup: dict | None = None) -> dict:
             break
     if startup and startup["kind"] == "sce-crt0" and "metrowerks" in families:
         footnotes.append(startup["note"])
-    return dict(compiler=name, confidence=conf, reasons=reasons, footnotes=footnotes)
+    # float_constants: what the float-constant test alone said (None when it was not run):
+    # "2.96-like", "3.x-like", or "abstains" for a body too small to say
+    return dict(compiler=name, confidence=conf, reasons=reasons, footnotes=footnotes, float_constants=float_test)
 
 
 def fingerprint(path_name: str, data: bytes, base=None, sidecar=None) -> dict:
@@ -644,6 +668,23 @@ def self_test() -> int:
     checks["div-unpadded"] = r["census"]["div_s_padded"] == 0 and any("only 0 of 25" in x for x in r["verdict"]["reasons"])
     r = fingerprint("cw", build_elf(SQ_PROLOGUE * 30 + SD_PROLOGUE * 25))
     checks["cw-unpadded"] = any("not SCE gcc" in x for x in r["verdict"]["reasons"])
+    # float constants: 2.96 forms them as lui+mtc1 immediates, 3.x loads them from .rodata. A
+    # small overlay that only reads struct fields must not read as 3.x; a large body with no
+    # immediate at all must; one with the 2.96 share of immediates must not.
+    plain = asm(0x27BDFFC0, 0xFFB00000, 0xFFB10008, 0xFFBF0018, 0xC4800010, 0xC4810014, 0x03E00008, 0x27BD0040)
+    withimm = asm(0x27BDFFC0, 0xFFB00000, 0xFFB10008, 0xFFBF0018, 0x3C023F80, 0x44820000, 0xC4810014, 0x03E00008, 0x27BD0040)
+    r = fingerprint("small", build_elf(plain * 14))
+    checks["float-small-abstains"] = r["verdict"]["compiler"].startswith("SCE ee-gcc 2.96") \
+        and r["census"]["float_pool_loads"] == 28 and r["verdict"]["float_constants"] == "abstains" \
+        and r["verdict"]["confidence"] == "low"
+    r = fingerprint("gcc3", build_elf(plain * 60))
+    checks["float-pool-3x"] = r["verdict"]["compiler"].startswith("SCE ee-gcc 3.x") and r["verdict"]["confidence"] == "low" \
+        and r["verdict"]["float_constants"] == "3.x-like"
+    r = fingerprint("gcc296", build_elf(plain * 40 + withimm * 30))
+    checks["float-imm-296"] = r["verdict"]["compiler"].startswith("SCE ee-gcc 2.96") \
+        and r["verdict"]["float_constants"] == "2.96-like"
+    r = fingerprint("mw", mw)
+    checks["float-not-run"] = r["verdict"]["float_constants"] is None
     ok = all(checks.values())
     print(json.dumps(dict(self_test="ok" if ok else "fail", checks=checks)))
     return 0 if ok else 1
