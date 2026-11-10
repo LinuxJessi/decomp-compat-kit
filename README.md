@@ -56,6 +56,7 @@ the kit has a tool for each. The long reference is [`docs/TOOLS.md`](docs/TOOLS.
 | **compile** | `cw_run.py` | Run CodeWarrior for PS2's `mwccps2` on this machine, natively through Wine or in a container |
 | **ledger** | `ledger.py` | Which functions are byte-identical with every relocation applied, re-proved on demand (a target's `matched.tsv`) |
 | **port** | `port_check.py`, `harvest_relocs.py` | Does game A's decomp C reproduce game B's bytes, and where did B's linker put every symbol it names? |
+| **agents** | `install_agents.py` | Install Claude Code agents (orchestrator, tiered matchers, reviewer, integrators, verifier) that run the match loop; a Xenosaga set is picked automatically for a Xenosaga project |
 
 Measured results for each tool are in `docs/TOOLS.md`; the shape of a good
 result is the Xenosaga I case study there: 817 of 857 functions identical
@@ -102,6 +103,30 @@ ee-gcc lane. The whole-unit verify and the toolchain probe run as background
 jobs. Why that helps, in plain language: [`docs/MCP.md`](docs/MCP.md). Install
 and the run log: [`mcp/README.md`](mcp/README.md).
 
+## Agents
+
+`agents/` holds Claude Code agent definitions that run the match loop as a team:
+an orchestrator, four matchers tiered by triage class (Haiku, Sonnet, Opus, Fable;
+form ceilings 4, 15, 40, 40), a reviewer, two integrators, a stock verifier, an
+evidence enricher and an IOP matcher. A matcher works one function in one sandbox
+through the `ps2decomp` MCP tools or `match_kit.py`; candidates are reviewed by
+another model family and landed one at a time under the upstream project's own
+whole-file gate. There are two sets with the same roles: a generic one and a
+Xenosaga one that adds what the Xenosaga lanes learned, per episode.
+
+```sh
+tools/install_agents.py detect  --project ~/src/xsg-ii-decomp   # {"flavour": "xenosaga", "game": "xenosaga-2", ...}
+tools/install_agents.py install --project ~/src/xsg-ii-decomp   # -> .claude/agents, Xenosaga set
+claude --agent kit-shion-orchestrator
+```
+
+The installer picks the Xenosaga set when the project's files, its git remote or its
+config name a Xenosaga serial, and otherwise when the `DECOMP_TARGET`, `DECOMP_BINARY` or
+`DECOMP_GAME_DIR` environment variables do (exported shell-wide, they label every
+project: check with `detect` or pass `--flavour`). Without `--force` it never overwrites
+a hand-written or locally edited agent. Roles, models and editing:
+[`agents/README.md`](agents/README.md).
+
 ## Documentation
 
 | | |
@@ -110,6 +135,7 @@ and the run log: [`mcp/README.md`](mcp/README.md).
 | [`docs/games/`](docs/games/README.md) | one page per game |
 | [`docs/CORPUS.md`](docs/CORPUS.md) | the six-game fingerprint table and how to reproduce a row |
 | [`docs/MCP.md`](docs/MCP.md) | what the MCP server does and why it helps |
+| [`agents/README.md`](agents/README.md) | the Claude Code agents: roles, models, the generic and Xenosaga sets, detection, install, editing |
 | [`docs/MATCHING-PLAYBOOK.md`](docs/MATCHING-PLAYBOOK.md) | the loop discipline, the evidence card, forty-odd GCC 2.96 codegen idioms each tied to the function that proved it |
 | [`docs/TOOLCHAIN-DIFFERENCES.md`](docs/TOOLCHAIN-DIFFERENCES.md) | the catalogue of compiler and assembler behaviours between the archived ee-gcc 2.96 and the retail builds, how each shows up in a diff, and the probe results, including Sony's own 2000 toolchain |
 | [`docs/CODEWARRIOR.md`](docs/CODEWARRIOR.md) | the Metrowerks side: the overlay record, linker symbols and command files, the startup code, the compiler's vocabulary, read from the CodeWarrior for PlayStation discs and confirmed against CodeWarrior for PS2 |

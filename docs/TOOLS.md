@@ -461,6 +461,47 @@ patched. Objects come out stamped `MW MIPS C Compiler (2.4.1.01)` with the
 `sq`/16 prologues the corpus shows (`docs/SDK-ARCHIVE.md` §4). A judged
 CodeWarrior lane (compile with it and byte-compare) is the next step.
 
+## Agents: `install_agents.py`
+
+Renders and installs the Claude Code agents in `agents/` (roles, models and the two
+flavours are described in [`../agents/README.md`](../agents/README.md)):
+
+```sh
+tools/install_agents.py render [--check]                  # agents/generic + agents/xenosaga from roles.json, templates, games
+tools/install_agents.py detect --project DIR              # {"flavour", "game", "reason"}; writes nothing
+tools/install_agents.py install --project DIR [--flavour auto|generic|xenosaga] [--dry-run] [--force]
+tools/install_agents.py install --user --flavour generic  # into ~/.claude/agents; --user needs --flavour
+tools/install_agents.py self-test
+```
+
+- `render` builds every agent from `agents/roles.json`, `agents/templates/<template>.md`
+  and the `## key` sections of `agents/games/<flavour>.md`; an unknown `{{placeholder}}`
+  is an error (exit 2). `--check` writes nothing and exits 1 listing each file that
+  differs, is missing or is stale.
+- `detect` (`--flavour auto`) takes the first rule that fires: an explicit flavour,
+  `DECOMP_GAME`, a Xenosaga serial in the project tree (three levels), a git remote
+  matching `xsg-i-decomp`, `xsg-ii-decomp`, `xsg-iii-decomp` or `xenosaga`, the project's `config/originals.json` or
+  splat yaml, then the environment (`DECOMP_TARGET` manifest, `DECOMP_BINARY`, the
+  `DECOMP_GAME_DIR` listing), which is often exported shell-wide for one game. Serials:
+  `SLUS_204.69` (I), `SLUS_208.92` and `SLUS_211.33` (II), `SLUS_213.89` (III).
+  Otherwise generic. An unreadable `DECOMP_TARGET` manifest is named in `reason`.
+- `install` copies one flavour into `DIR/.claude/agents` (`DIR` must exist) and writes
+  `.kit-flavour.json` there (`flavour`, `game`, `reason`, `kit_commit`, the agent names
+  and the hash of each file written); the kit's path goes to
+  `~/.claude/decomp-compat-kit.json`, outside the project (`DECOMP_KIT` overrides it).
+  Without `--force` it refuses, before writing anything, when a same-named file lacks the
+  kit marker or a kit agent was edited since the kit wrote it; `--force` overwrites after
+  a copy to `NAME.md.kit-backup`. A symlink in place of an agent or a state file is always
+  refused. It removes every kit-marked agent in the directory whose name a kit flavour
+  renders but the installed set does not contain (the other flavour's set, or an agent
+  dropped from `roles.json`); files without the marker are never removed. In a git work
+  tree where the agents are not ignored, the summary says so.
+
+Measured (2026-11-10): 11 agents per flavour, 18-68 lines each; `self-test` 34 checks;
+`detect` on a clone of OpokXeno/xsg-ii-decomp gives `xenosaga-2` from its git remote;
+an empty directory gives generic when no `DECOMP_*` game variable is set (with
+`DECOMP_GAME_DIR` exported for Episode I it gives `xenosaga-1`: use `--flavour generic`).
+
 ## Running an i386 ee-gcc on an arm64 Mac
 
 The SCE ee-gcc binaries are 32-bit Linux ELFs. There is no native path on

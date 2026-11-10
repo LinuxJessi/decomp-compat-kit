@@ -64,6 +64,12 @@ externs and typedefs, `match_edit` for a TU-local header field) -> `match_check`
 with one changed hypothesis per call -> repeat until MATCH or a stop ->
 `match_verdict` and `match_patch`.
 
+The matching agents in [`../agents/`](../agents/README.md) (installed with
+`tools/install_agents.py`) use these tools when a `ps2decomp` server is registered and
+fall back to the `tools/*.py` commands otherwise; the Xenosaga set names the
+registration per episode and unit (`ps2decomp`, `ps2decomp-ov01`, `ps2decomp-xs2`).
+Matcher agents carry no tool allowlist, so the server's tools stay available to them.
+
 ## The compiler-family gate (2026-10-31)
 
 The kit compiles with SCE ee-gcc only. `doctor` now fingerprints the configured
@@ -98,7 +104,7 @@ register, a shape no typed spelling tried so far reproduces.
 
 Driven from a script with the SDK's `Client(StdioServerParameters(...))` (result
 fields are snake_case: `resource_templates`, `uri_template`, `structured_content`),
-against the lane worktree `~/kosmos/xsg/.work/ov01-l2` at `f2c148c` (branch
+against a lane worktree at `f2c148c` (branch
 `ov01-lane2`, 72 lane functions, merged with Opok's master `9fb2a68`). Discovery
 needs the private TU manifest, which Opok's tree does not carry: `config/tu-build.json`
 and `config/tu/ov01/` were copied into the worktree as ignored files.
@@ -123,11 +129,11 @@ Found on the way (all four fixed the same day; the probe, the memo and the
 temp file are in `server.py`, re-tested over stdio against the same tree):
 
 
-- `~/kosmos` is its own APFS volume and colima does not share it, so docker sees
+- The worktree's volume was a separate APFS volume colima does not share, so docker sees
   an empty `/toolchains`; cc1 fails with `cannot open shared object file` (rc 127)
   and every TU reports BUILD FAILED. `doctor` says the toolchains are fine because
-  its check is a host-side `is_dir()`. Point `DECOMP_TOOLCHAINS` at a copy under
-  `$HOME/Desktop`. Fixed: `doctor` now runs `docker_sees()` (the pinned cc1 must
+  its check is a host-side `is_dir()`. Point `DECOMP_TOOLCHAINS` at a copy on a
+  shared volume. Fixed: `doctor` now runs `docker_sees()` (the pinned cc1 must
   be listable through the mount, `visible_in_docker`), and `verify_tu`, `verify_unit_start`
   and `match_init` refuse a contract run up front with the same reason (`contract_blocker()`).
 - `match_write_function` on an existing definition re-inserts `declarations`
@@ -146,8 +152,7 @@ temp file are in `server.py`, re-tested over stdio against the same tree):
 
 Five seats reviewed the diff (openai gpt-6-sol, google gemini-3.1-pro, deepseek
 v4-pro, moonshot kimi-k3, alibaba qwen3.8-max, through Hermes' `nous` provider;
-brief = the diff plus the findings above; transcripts under
-`~/kosmos/xsg/.work/moa/roundtable-mcp/`). Checked against the code and applied:
+brief = the diff plus the findings above; transcripts kept outside the kit). Checked against the code and applied:
 
 - `triage_unit` built its rows from stdout, which `run()` caps at `TEXT_LIMIT`
   (12 KB; the OV01 table is 58 KB), so it silently returned 233 of 496 easy rows
@@ -195,7 +200,7 @@ the same bind. Tests: `mcp/test_server.py` (13, no docker).
 - **`lint_tu`.** Static maintainer checks on one TU (prototypes after their
   definition, unused defines/prototypes, gotos, raw masks, long lines), optionally
   only for what the file adds over a base copy. The compiler-warning diff against a
-  base build stays in the pack's `kit/public-lane/prepush-check.py`.
+  base build stays outside the kit, in a separate pre-push check.
 
 ## Third run (2026-11-03): OV01 on Opok's master d31fadb
 
@@ -227,7 +232,7 @@ What changed (nothing is keyed on the game; the Xenosaga I path is untouched):
   constant resolved to one address and nine functions differed. Rebuild both after a rename:
 
   ```sh
-  tools/upstream_target.py --upstream ~/kosmos/xsg/.work/xsg2 --game-dir ~/kosmos/xsg/.work/xs2-game \
+  tools/upstream_target.py --upstream UPSTREAM_DIR --game-dir GAME_DIR \
       --symbols-out symbols/xs2-symbols.csv --target-out symbols/xs2-target.json
   ```
 - `verify_decomp.py`: a target manifest may name its source tree with `root` (the manifest
@@ -240,19 +245,20 @@ What changed (nothing is keyed on the game; the Xenosaga I path is untouched):
   other than the configured one with that unit's own original (`ov01/tu000` with OV01.OVL).
 
 Registration (a third server; `DECOMP_TARGET` is what selects the adapter, the manifest
-expands `$DECOMP_UPSTREAM`, `$DECOMP_GAME_DIR` and `$DECOMP_TOOLCHAINS`):
+expands `$DECOMP_UPSTREAM`, `$DECOMP_GAME_DIR` and `$DECOMP_TOOLCHAINS`; `KIT`, `UPSTREAM_DIR`,
+`GAME_DIR` and `TOOLCHAINS_DIR` stand for absolute paths on your machine):
 
 ```sh
 claude mcp add --scope user ps2decomp-xs2 \
-  -e "DECOMP_TARGET=$HOME/Desktop/decomp-compat-kit/symbols/xs2-target.json" \
-  -e "DECOMP_UPSTREAM=$HOME/kosmos/xsg/.work/xsg2" \
-  -e "DECOMP_GAME_DIR=$HOME/kosmos/xsg/.work/xs2-game" \
+  -e "DECOMP_TARGET=KIT/symbols/xs2-target.json" \
+  -e "DECOMP_UPSTREAM=UPSTREAM_DIR" \
+  -e "DECOMP_GAME_DIR=GAME_DIR" \
   -e "DECOMP_BINARY=SLUS_208.92" -e "DECOMP_RESIDENT=SLUS_208.92" \
-  -e "DECOMP_SYMBOLS=$HOME/Desktop/decomp-compat-kit/symbols/xs2-symbols.csv" \
-  -e "DECOMP_TOOLCHAINS=$HOME/kosmos/xsg/.work/toolchains-gate" \
-  -e "EE_ROOTFS=$HOME/xs3-match/rootfs" \
+  -e "DECOMP_SYMBOLS=KIT/symbols/xs2-symbols.csv" \
+  -e "DECOMP_TOOLCHAINS=TOOLCHAINS_DIR" \
+  -e "EE_ROOTFS=$HOME/ee-rootfs" \
   -e "DECOMP_SANDBOXES=$HOME/.cache/decomp-match-xs2" \
-  -- $HOME/Desktop/decomp-compat-kit/.venv/bin/python $HOME/Desktop/decomp-compat-kit/mcp/server.py
+  -- KIT/.venv/bin/python KIT/mcp/server.py
 ```
 
 Verified at upstream `ba20cba`, contract compiler, on a scratch copy and (doctor, `verify_tu`)
@@ -265,8 +271,8 @@ ov02   identical: 8/8  (100.0%)   differing: 0   unverifiable: 0   unknown symbo
 ```
 
 (235 + 82 + 3 TUs built, 14 of them `-O0`; 30 listed TUs have no C file yet.) Over stdio with
-the SDK `Client`: `doctor` `ok: true` (`visible_in_docker: true` for the toolchains under
-`~/kosmos`, contract `current: true` against pin `58a63b84ed438510`); `name_lookup` by name
+the SDK `Client`: `doctor` `ok: true` (`visible_in_docker: true` for the toolchains on the
+separate volume, contract `current: true` against pin `58a63b84ed438510`); `name_lookup` by name
 and by address; `match_init enepc_001F6680` with `compiler=contract` (`baseline_matches: 1`,
 the TU's one C function); `match_card`, `match_disasm`; `verify_tu main/tu073` `match=1`,
 `main/tu054` `match=28`, `ov01/tu000` `match=8`; and on `Resigne` one throwaway form through
