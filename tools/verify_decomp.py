@@ -45,7 +45,19 @@ Usage:
   ./verify_decomp.py --upstream ~/src/some-decomp --tu main/tu086 -v
   ./verify_decomp.py --upstream ~/src/some-decomp --compiler contract --toolchains DIR
   ./verify_decomp.py --src src/*.c -I include -G 0 --binary ORIGINAL.ELF --symbols symbols.csv
+  ./verify_decomp.py --target path/to/decomp-target.json --unit main --out report.json
   ./verify_decomp.py --self-test
+
+Targets (--target, or DECOMP_TARGET): a decomp-target/1 manifest names the originals, the
+symbol table, the units, every TU with its -G and its compile contract (per TU: a TU may
+need another assembler), the toolchain directory and the ledger, so a tree with no
+xsg-i-decomp config layout is verified without assuming one (docs/TOOLS.md "Targets").
+In target mode a TU's source may carry annotations in comments: `@addr NAME 0xVA` (a name
+for this TU only), `@cflags -G0 ...` (its flags), `@rodata 0xA 0xB ...` (its .rodata
+objects in emission order), `@data/@sdata/@bss/@sbss 0xVA` (a section base); references
+into the original's initialised data (.rodata strings and floats, .lit4/.lit8, .data,
+.sdata) are resolved by content: the address the original encodes is accepted only when
+the original holds the same bytes there as the object (relocated words masked).
 
 Target layout: --binary is any 32-bit LE ELF (a boot executable or an overlay ELF);
 its program headers give the text placement and its basename selects the rows of
@@ -122,7 +134,9 @@ STOCK_AS = "/rootfs/opt/ee/bin/ee-as"
 STEP_TIMEOUT = 30                                    # seconds per cc1 / as step inside the box
 
 R_MIPS_32, R_MIPS_26, R_MIPS_HI16, R_MIPS_LO16, R_MIPS_GPREL16 = 2, 4, 5, 6, 7
+R_MIPS_LITERAL = 8                                   # gp-relative literal-pool (.lit4/.lit8) load
 STT_OBJECT, STT_FUNC, STT_SECTION = 1, 2, 3
+SHT_REL, SHT_NOBITS = 9, 8
 NOP = b"\x00\x00\x00\x00"
 E = "<"
 
@@ -230,12 +244,20 @@ def read_elf(path: Path):
 class Object:
     """One assembled .o, relocated against real addresses."""
 
-    def __init__(self, path: Path, syms: Symbols, image: "bytes | None" = None):
+    def __init__(self, path: Path, syms: Symbols, image: "bytes | None" = None, anchors: "dict | None" = None):
         """`image` (the original executable) lets section-relative references be
         checked: a jump table in .rodata resolves only if every entry points at
-        the same code as the original's table. Without it they stay unresolved."""
+        the same code as the original's table. Without it they stay unresolved.
+
+        `anchors` (target mode only; None keeps the historical behaviour exactly) turns
+        on content-verified resolution of section-relative data references: explicit
+        `rodata` object addresses and `sect` section bases from a TU's annotations first,
+        else the address the original encodes at the reference, accepted only when the
+        original holds the object's bytes there; `gp` is the fallback $gp value."""
         self.syms = syms
         self.image = image
+        self.anchors = anchors
+        self._refs = None
         d, secs = read_elf(path)
         self._raw = d
         self.text_idx = next(i for i, s in enumerate(secs) if s["name"] == ".text")
@@ -278,6 +300,7 @@ class Object:
         self.sections = secs
         self._pending_lo: dict[int, int] = {}
         self.placeholders: list[tuple[int, str]] = []
+        self._site_stack: list[int] = []
         self._segments = self._image_segments() if image else []
         self.unresolved: list[tuple[int, str]] = []
         # (offset, name) of every reference to a name the table does not hold at all:
@@ -286,6 +309,14 @@ class Object:
         self._relocate()
 
     def _off_to_va(self, off: int):
+        if self.anchors is not None:
+            # target mode: the original's function may be longer than the object's; only the
+            # object's own extent places an offset (else a TU-local callee right after a
+            # function lands inside that function's longer original)
+            for f in self.funcs:
+                if f["off"] <= off < f["off"] + (f.get("obj_size") or f["size"]):
+                    return f["va"] + (off - f["off"])
+            return None
         for f in self.funcs:
             if f["off"] <= off < f["off"] + max(f["size"], f.get("obj_size") or 0):
                 return f["va"] + (off - f["off"])
@@ -316,6 +347,8 @@ class Object:
         look ahead past other HI16s instead of requiring the very next entry.
         """
         si = self.relocs[i][1] >> 8
+        if self.anchors is not None:
+            return self._pair_by_offset(si, off, w)
         for noff, ninfo in self.relocs[i + 1:]:
             if (ninfo >> 8) != si:
                 continue
@@ -410,11 +443,22 @@ class Object:
                     # original never holds a table at 0, so this can only report a
                     # mismatch with a usable diff, never a false match.
                     self.placeholders.append((off, why))
+                    self._force_diff(off, w)
                     self._pending_lo[noff] = 0
                     return None
         else:
             va = self._local_symbol_va(sym["shndx"], addend)
             why = None if va is not None else f"no named symbol at {sec}+{addend:#x}"
+        if va is None and self.anchors is not None and sec != ".text":
+            va, why2 = self._anchored(sym["shndx"], addend, ("hilo", off, noff))
+            if va is None and why2 and why2.startswith("content"):
+                # the original references a different object: compare anyway against an
+                # address no original can hold, so the verdict is a diff, never a match
+                self.placeholders.append((off, why2))
+                self._force_diff(off, w)
+                self._pending_lo[noff] = 0
+                return None
+            why = why2 or why
         if va is None:
             return why
         low = va & 0xFFFF
@@ -423,8 +467,18 @@ class Object:
         self._pending_lo[noff] = va
         return None
 
+    def _force_diff(self, off, w):
+        """Write a 16-bit field that cannot equal the original's at OFF: a reference that
+        failed its proof must show as a difference whatever the original holds there."""
+        va = self._off_to_va(off)
+        orig = (self._image_word(va) if va is not None else None) or 0
+        self._put(off, (w & 0xFFFF0000) | ((orig ^ 1) & 0xFFFF))
+
     def _relocate(self):
-        for i, (off, info) in enumerate(self.relocs):
+        order = range(len(self.relocs)) if self.anchors is None else \
+            sorted(range(len(self.relocs)), key=lambda k: ((self.relocs[k][1] & 0xFF) != R_MIPS_HI16, k))
+        for i in order:
+            off, info = self.relocs[i]
             rtype, si = info & 0xFF, info >> 8
             sym = self.symbols[si]
             w = self._word(off)
@@ -439,14 +493,32 @@ class Object:
                 if rtype == R_MIPS_LO16 and off in self._pending_lo:
                     self._put(off, (w & 0xFFFF0000) | (self._pending_lo.pop(off) & 0xFFFF))
                     continue
-                if rtype == R_MIPS_GPREL16 and sec != ".text":
+                if rtype == R_MIPS_LO16 and self.anchors is not None:
+                    why = self._section_lo_shared(off, w, sym)
+                    if why:
+                        self.unresolved.append((off, why))
+                    continue
+                if (rtype == R_MIPS_GPREL16 or (rtype == R_MIPS_LITERAL and self.anchors is not None)) \
+                        and sec != ".text":
                     a = w & 0xFFFF
                     a = (a - 0x10000 if a & 0x8000 else a) + self._gp0()      # section offset
                     va = self._local_symbol_va(sym["shndx"], a)
+                    if va is None and self.anchors is not None:
+                        va, why2 = self._anchored(sym["shndx"], a, ("gp", off))
+                        if va is None and why2 and why2.startswith("content"):
+                            orig = self._image_word(self._off_to_va(off)) or 0
+                            self.placeholders.append((off, why2))
+                            self._put(off, (w & 0xFFFF0000) | ((orig ^ 1) & 0xFFFF))   # forced difference
+                            continue
                     if va is None:
-                        self.unresolved.append((off, f"no named symbol for {sec}+{a:#x} GPREL16"))
+                        self.unresolved.append((off, f"no named symbol for {sec}+{a:#x} "
+                                                     f"{'GPREL16' if rtype == R_MIPS_GPREL16 else 'LITERAL'}"))
                     else:
-                        self._put(off, (w & 0xFFFF0000) | ((va - self.syms.gp) & 0xFFFF))
+                        d = va - self._gp_value()
+                        if not -0x8000 <= d < 0x8000:      # a 16-bit $gp offset cannot reach it
+                            self.unresolved.append((off, f"{sec}+{a:#x} at {va:#x} is out of $gp range"))
+                            continue
+                        self._put(off, (w & 0xFFFF0000) | (d & 0xFFFF))
                     continue
                 if sec != ".text" or rtype != R_MIPS_26:
                     self.unresolved.append((off, f"{sec} reloc type {rtype}"))
@@ -487,9 +559,315 @@ class Object:
                 a = w & 0xFFFF
                 a = a - 0x10000 if a & 0x8000 else a
                 base = self.syms.gp if rtype == R_MIPS_GPREL16 else 0
+                if rtype == R_MIPS_GPREL16 and self.anchors is not None and not -0x8000 <= value + a - base < 0x8000:
+                    self.unresolved.append((off, f"{sym['name']} at {value + a:#x} is out of $gp range"))
+                    continue
                 self._put(off, (w & 0xFFFF0000) | ((value + a - base) & 0xFFFF))
             else:
                 self.unresolved.append((off, f"reloc type {rtype}"))
+
+    # ---- relocation pairing by instruction offset (target mode)
+
+    def _func_bounds(self):
+        if getattr(self, "_fbounds", None) is None:
+            starts = sorted({s["val"] for s in self.symbols if s["typ"] == STT_FUNC and s["shndx"] == self.text_idx})
+            self._fbounds = starts + [len(self.text)]
+        return self._fbounds
+
+    def _func_of(self, off):
+        b = self._func_bounds()
+        lo = max((x for x in b if x <= off), default=0)
+        hi = min((x for x in b if x > off), default=len(self.text))
+        return lo, hi
+
+    def _pair_by_offset(self, si, off, w):
+        """The LO16 a HI16 pairs with, by instruction order: the first LO16 against the same
+        symbol after it in the same function. The relocation table of the -g assembler does
+        not keep each HI16 next to its LO16 (it can list the HI16 after a later function's
+        LO16), so the table order the ABI promises cannot be relied on."""
+        lo_f, hi_f = self._func_of(off)
+        cands = sorted(noff for noff, ninfo in self.relocs
+                       if (ninfo >> 8) == si and (ninfo & 0xFF) == R_MIPS_LO16 and off < noff < hi_f)
+        if not cands:
+            # a %lo placed before its %hi (a loop body ahead of the block that loads the
+            # register): accepted only when exactly one %lo in the function uses that register
+            rt = (w >> 16) & 31
+            back = [noff for noff, ninfo in self.relocs
+                    if (ninfo >> 8) == si and (ninfo & 0xFF) == R_MIPS_LO16 and lo_f <= noff < off
+                    and (self._word_orig(noff) >> 21) & 31 == rt]
+            if len(back) != 1:
+                return None, None
+            lo = self._word_orig(back[0]) & 0xFFFF
+            return ((w & 0xFFFF) << 16) + (lo - 0x10000 if lo & 0x8000 else lo), back[0]
+        # two %hi against one section symbol can both precede their %lo (lui a; lui b;
+        # addiu a; addiu b): the %lo that belongs to this %hi uses the register it loaded
+        rt = (w >> 16) & 31
+        same = [n for n in cands if (self._word_orig(n) >> 21) & 31 == rt]
+        noff = (same or cands)[0]
+        lo = self._word_orig(noff) & 0xFFFF
+        return ((w & 0xFFFF) << 16) + (lo - 0x10000 if lo & 0x8000 else lo), noff
+
+    def _section_lo_shared(self, off, w, sym):
+        """A LO16 against a section symbol that no HI16 claimed: one %hi feeding several
+        %lo (GCC shares it). Its governing HI16 is the nearest one before it, same symbol,
+        same function; the address is resolved and proven like the HI16's own."""
+        si = next(k for k, s in enumerate(self.symbols) if s is sym)
+        lo_f, _hi_f = self._func_of(off)
+        his = [hoff for hoff, hinfo in self.relocs
+               if (hinfo >> 8) == si and (hinfo & 0xFF) == R_MIPS_HI16 and lo_f <= hoff < off]
+        sec = self.sections[sym["shndx"]]["name"]
+        if not his:
+            return f"{sec} LO16 without a %hi"
+        rs = (self._word_orig(off) >> 21) & 31          # the %hi that loaded this %lo's base register
+        hoff = max([h for h in his if (self._word_orig(h) >> 16) & 31 == rs] or his)
+        lo = w & 0xFFFF
+        addend = ((self._word_orig(hoff) & 0xFFFF) << 16) + (lo - 0x10000 if lo & 0x8000 else lo)
+        if sec == ".text":
+            va = self._off_to_va(addend)
+            why = None if va is not None else f"text offset {addend:#x} outside known funcs"
+        else:
+            va = self._local_symbol_va(sym["shndx"], addend)
+            why = None if va is not None else f"no named symbol at {sec}+{addend:#x}"
+            if va is None and sec.startswith(".rodata"):
+                va, why = self._rodata_table_va(sym["shndx"], addend, hoff, off)
+            if va is None:
+                va, why2 = self._anchored(sym["shndx"], addend, ("hilo", hoff, off))
+                if va is None and why2 and why2.startswith("content"):
+                    orig = self._image_word(self._off_to_va(off)) or 0
+                    self.placeholders.append((off, why2))
+                    self._put(off, (w & 0xFFFF0000) | ((orig ^ 1) & 0xFFFF))
+                    return None
+                why = why2 or why
+        if va is None:
+            return why
+        self._put(off, (w & 0xFFFF0000) | (va & 0xFFFF))
+        return None
+
+    def _word_orig(self, off):
+        """The object's own word at OFF before relocation (the in-place addend)."""
+        return struct.unpack_from(E + "I", self._raw, self.sections[self.text_idx]["off"] + off)[0]
+
+    # ---- content-verified anchoring (target mode)
+
+    def _gp_value(self):
+        return self.syms.gp or (self.anchors or {}).get("gp") or 0
+
+    def _image_read(self, va, n):
+        for sva, soff, size in self._segments:
+            if sva <= va and va + n <= sva + size:
+                return self.image[soff + va - sva: soff + va - sva + n]
+        return None
+
+    def _site_va(self, site):
+        """The data address the original encodes at a reference site: a %hi/%lo pair
+        (both instructions read at the matching offsets of the original function) or a
+        16-bit $gp offset. None when the site is outside known functions."""
+        if site[0] == "hilo":
+            hv, lv = self._off_to_va(site[1]), self._off_to_va(site[2])
+            if hv is None or lv is None:
+                return None
+            h, l = self._image_word(hv), self._image_word(lv)
+            if h is None or l is None:
+                return None
+            lo = l & 0xFFFF
+            return (((h & 0xFFFF) << 16) + (lo - 0x10000 if lo & 0x8000 else lo)) & 0xFFFFFFFF
+        v = self._off_to_va(site[1])
+        gp = self._gp_value()
+        if v is None or not gp:
+            return None
+        x = self._image_word(v)
+        if x is None:
+            return None
+        imm = x & 0xFFFF
+        return (gp + (imm - 0x10000 if imm & 0x8000 else imm)) & 0xFFFFFFFF
+
+    def _section_refs(self):
+        """{shndx: set of offsets} every section-symbol relocation of the object refers to,
+        plus every named symbol's value: the boundaries a section's objects are split at."""
+        if self._refs is not None:
+            return self._refs
+        refs = collections.defaultdict(set)
+        gp0 = self._gp0()
+        for i, (off, info) in enumerate(self.relocs):
+            rt, sym = info & 0xFF, self.symbols[info >> 8]
+            if sym["typ"] != STT_SECTION:
+                continue
+            w = self._word_orig(off)
+            if rt == R_MIPS_HI16:
+                addend, _ = self._pair_addend(i, off, w)
+                if addend is not None:
+                    refs[sym["shndx"]].add(addend)
+            elif rt in (R_MIPS_GPREL16, R_MIPS_LITERAL):
+                a = w & 0xFFFF
+                refs[sym["shndx"]].add((a - 0x10000 if a & 0x8000 else a) + gp0)
+            elif rt == R_MIPS_LO16 and self.anchors is not None:
+                # one %hi feeding several %lo: each %lo names its own object
+                lo_f, _hi_f = self._func_of(off)
+                his = [h for h, hinfo in self.relocs
+                       if (hinfo >> 8) == (info >> 8) and (hinfo & 0xFF) == R_MIPS_HI16 and lo_f <= h < off]
+                if his:
+                    rs = (w >> 21) & 31
+                    hoff = max([h for h in his if (self._word_orig(h) >> 16) & 31 == rs] or his)
+                    lo = w & 0xFFFF
+                    refs[sym["shndx"]].add(((self._word_orig(hoff) & 0xFFFF) << 16) + (lo - 0x10000 if lo & 0x8000 else lo))
+        for s in self.sections:
+            if s["typ"] != SHT_REL or s["name"] == ".rel.text":
+                continue
+            tgt = self.sections[s["info"]] if s["info"] < len(self.sections) else None
+            if tgt is None:
+                continue
+            for k in range(s["size"] // 8):
+                roff, rinfo = struct.unpack_from(E + "II", self._raw, s["off"] + k * 8)
+                rsym = self.symbols[rinfo >> 8]
+                if (rinfo & 0xFF) == R_MIPS_32 and rsym["typ"] == STT_SECTION:
+                    refs[rsym["shndx"]].add(struct.unpack_from(E + "I", self._raw, tgt["off"] + roff)[0])
+        for sy in self.symbols:
+            if sy["name"] and sy["typ"] in (STT_OBJECT, STT_FUNC, 0) and 0 < sy["shndx"] < len(self.sections):
+                refs[sy["shndx"]].add(sy["val"])
+        self._refs = refs
+        return refs
+
+    def _object_span(self, shndx, addend):
+        size = self.sections[shndx]["size"]
+        bounds = sorted({b for b in self._section_refs().get(shndx, ()) if 0 <= b <= size} | {0, size})
+        start = max((b for b in bounds if b <= addend), default=0)
+        end = min((b for b in bounds if b > addend), default=size)
+        return start, end
+
+    def _relocated_words(self, shndx):
+        """Offsets of the words of section SHNDX that carry a relocation (pointers whose
+        value legitimately differs between images): masked in the content check."""
+        out = set()
+        for s in self.sections:
+            if s["typ"] == SHT_REL and s["info"] == shndx:
+                for k in range(s["size"] // 8):
+                    out.add(struct.unpack_from(E + "I", self._raw, s["off"] + k * 8)[0] & ~3)
+        return out
+
+    def _relocated_pointers(self, shndx):
+        """{offset: the address the pointer must hold, or None when it cannot be resolved}
+        for every relocated word of section SHNDX. A named target resolves through the
+        symbol table, a .text-relative one through the function map; the rest stay None
+        and are masked, never counted as compared."""
+        out = {}
+        for s in self.sections:
+            if s["typ"] != SHT_REL or s["info"] != shndx:
+                continue
+            tgt = self.sections[shndx]
+            for k in range(s["size"] // 8):
+                roff, rinfo = struct.unpack_from(E + "II", self._raw, s["off"] + k * 8)
+                wo, expect = roff & ~3, None
+                if (rinfo & 0xFF) == R_MIPS_32 and roff + 4 <= tgt["size"] and tgt["typ"] != SHT_NOBITS:
+                    rsym = self.symbols[rinfo >> 8]
+                    addend = struct.unpack_from(E + "I", self._raw, tgt["off"] + roff)[0]
+                    if rsym["typ"] == STT_SECTION:
+                        if self.sections[rsym["shndx"]]["name"] == ".text":
+                            expect = self._off_to_va(addend)
+                        else:
+                            expect = self._local_symbol_va(rsym["shndx"], addend)
+                    else:
+                        try:
+                            expect = (self.syms.value(rsym["name"]) + addend) & 0xFFFFFFFF
+                        except KeyError:
+                            expect = None
+                out[wo] = expect
+        return out
+
+    def _pointee_matches(self, shndx, wo, got, depth):
+        """Whether the unnamed data the pointer at SHNDX+WO refers to is what the original holds
+        at GOT: True, False, or None when it cannot be followed (no section-relative target,
+        uninitialised data, too deep)."""
+        if depth >= 4:
+            return None
+        for s in self.sections:
+            if s["typ"] != SHT_REL or s["info"] != shndx:
+                continue
+            for k in range(s["size"] // 8):
+                roff, rinfo = struct.unpack_from(E + "II", self._raw, s["off"] + k * 8)
+                if roff & ~3 != wo or (rinfo & 0xFF) != R_MIPS_32:
+                    continue
+                rsym = self.symbols[rinfo >> 8]
+                if rsym["typ"] != STT_SECTION or self.sections[rsym["shndx"]]["typ"] == SHT_NOBITS \
+                        or self.sections[rsym["shndx"]]["name"] == ".text":
+                    return None
+                tgt = self.sections[shndx]
+                addend = struct.unpack_from(E + "I", self._raw, tgt["off"] + roff)[0]
+                self._site_stack.append(got)
+                try:
+                    va, why = self._anchored(rsym["shndx"], addend, ("abs",), depth + 1)
+                finally:
+                    self._site_stack.pop()
+                return va is not None if (va is not None or (why or "").startswith("content")) else None
+        return None
+
+    def _anchored(self, shndx, addend, site, _depth=0):
+        """(va, None) for a section-relative data reference proven by content, else
+        (None, why). `why` starts with "content" when the original names an address
+        whose bytes differ from the object's: a mismatch to report, not a gap."""
+        a = self.anchors or {}
+        sec = self.sections[shndx]
+        name = sec["name"]
+        start, end = self._object_span(shndx, addend)
+        va, named = None, False
+        if name.startswith(".rodata") and a.get("rodata"):
+            starts = sorted({self._object_span(shndx, r)[0]
+                             for r in self._section_refs().get(shndx, ()) if r < sec["size"]})
+            if start in starts and starts.index(start) < len(a["rodata"]):
+                va, named = a["rodata"][starts.index(start)] + (addend - start), True
+        if va is None and (a.get("sect") or {}).get(name) is not None:
+            va, named = a["sect"][name] + addend, True
+        if site[0] == "abs":                         # following a pointer: the address is the original's word
+            va, named = self._site_stack[-1], False
+        if va is None:
+            va = self._site_va(site)
+            if va is None:
+                return None, f"{name}+{addend:#x}: the original's reference cannot be read"
+        if sec["typ"] == SHT_NOBITS:
+            if named:
+                return va, None
+            return None, (f"{name}+{addend:#x} is uninitialised data: give it a name "
+                          f"(the symbol table, or @addr / @{name.lstrip('.')} in the TU)")
+        if not self.image or end <= start:
+            return None, f"{name}+{addend:#x}: nothing to compare"
+        base = va - (addend - start)
+        ours = bytearray(self._raw[sec["off"] + start: sec["off"] + end])
+        theirs = self._image_read(base, end - start)
+        if theirs is None:
+            return None, f"content {name}+{start:#x}: {base:#x} is not file-backed in the original"
+        theirs = bytearray(theirs)
+        masked = 0
+        for wo, expect in self._relocated_pointers(shndx).items():
+            if start <= wo < end:
+                got = struct.unpack_from(E + "I", theirs, wo - start)[0]
+                if expect is not None and expect != got:
+                    return None, (f"content of {name}+{start:#x}..{end:#x}: the pointer at +{wo:#x} is "
+                                  f"{got:#x} in the original, {expect:#x} here")
+                if expect is None:
+                    # a pointer to unnamed data (a string literal): the original's pointer must
+                    # lead to the same bytes this object's pointer leads to
+                    same = self._pointee_matches(shndx, wo, got, _depth)
+                    if same is False:
+                        return None, (f"content of {name}+{start:#x}..{end:#x}: the pointer at +{wo:#x} leads to "
+                                      f"other bytes in the original (at {got:#x})")
+                    if same is None:
+                        masked += 4                  # nothing to follow (uninitialised or unreadable): not compared
+                ours[wo - start: wo - start + 4] = b"\0\0\0\0"
+                theirs[wo - start: wo - start + 4] = b"\0\0\0\0"
+        if masked >= end - start:
+            return None, (f"{name}+{start:#x}..{end:#x} holds only pointers the symbol table cannot "
+                          f"resolve: nothing was compared (name the targets, or the object)")
+        if ours == theirs:
+            return va, None
+        # The span runs to the next referenced object, so it can end in alignment padding, and
+        # how much padding there is depends on the address (an object file pads a string to
+        # its next aligned table differently than the linked image did). Up to align-1
+        # trailing zero bytes of ours may therefore differ; nothing else may.
+        pad = len(ours) - len(ours.rstrip(b"\0"))
+        pad = min(pad, max(int(sec.get("align") or 1), 1) - 1, len(ours) - 1)
+        if pad and ours[:len(ours) - pad] == theirs[:len(ours) - pad]:
+            return va, None
+        return None, (f"content of {name}+{start:#x}..{end:#x} ({end - start} B) differs from the "
+                      f"original at {base:#x}")
 
     def bytes_for(self, f) -> bytes:
         """The original-sized window of .text at the function: what classify() reads."""
@@ -719,7 +1097,7 @@ def contract_tools(toolchains, upstream=None, overrides=None):
     return (c["cc1_path"], c["as_path"]) if c else None
 
 
-def build_script(compiler: str, contract=None) -> str:
+def build_script(compiler: str, contract=None, stock_cc1_flags: str = "") -> str:
     """The shell run inside the linux/386 box. Stock tools run through the rootfs
     loader; the contract cc1 does too, while the contract ee-as (glibc >= 2.34) runs
     on the box's own libc. Every step has a 30 s timeout; the script always exits 0
@@ -731,7 +1109,7 @@ def build_script(compiler: str, contract=None) -> str:
         cc1, cc1_extra = "$LD /toolchains/" + c["cc1"], c["cc1_flags"]
         as_run, as_flags = "/toolchains/" + c["ee_as"], c["as_flags"]
     else:
-        cc1, cc1_extra = "$LD " + STOCK_CC1, ""
+        cc1, cc1_extra = "$LD " + STOCK_CC1, stock_cc1_flags
         as_run, as_flags = "$LD " + STOCK_AS, ""
     return (
         '#!/bin/sh\n'
@@ -752,14 +1130,14 @@ def build_script(compiler: str, contract=None) -> str:
 
 
 def docker_build(work: Path, rootfs: Path, jobs: list, image: str, compiler: str = "stock",
-                 toolchains=None, timeout: int = 900, contract=None):
+                 toolchains=None, timeout: int = 900, contract=None, stock_cc1_flags: str = ""):
     """Run cc1 + as over every preprocessed TU inside a linux/386 box.
 
     Returns (docker rc, [CC1FAIL/ASFAIL lines], stderr tail). A non-zero rc means
     the box itself failed (no docker, no binfmt, a bad mount): the caller must
     treat the run as unverified, never as "0 functions match"."""
     script = work / "build.sh"
-    script.write_text(build_script(compiler, contract))
+    script.write_text(build_script(compiler, contract, stock_cc1_flags))
     mounts = ["-v", f"{rootfs}:/rootfs:ro", "-v", f"{work}:/work"]
     if compiler == "contract":
         mounts += ["-v", f"{Path(toolchains).resolve()}:/toolchains:ro"]
@@ -899,6 +1277,388 @@ def baseline_regressions(baseline: dict, per_tu: dict, matched: dict) -> list:
     return out
 
 
+# ------------------------------------------------------------------ targets
+
+TARGET_SCHEMA = "decomp-target/1"
+# Ghidra's auto names, and splat's (func_00A9CC70, D_0061B2D0, jtbl_0068DCB0; D_20 for an absolute
+# value such as a VU microprogram address): the address is in the name
+AUTO_NAME = re.compile(r"^(?:(?:FUN_|DAT_|LAB_|PTR_|[A-Za-z]*Ram)0*([0-9A-Fa-f]{6,8})|(?:func_|D_|B_|jtbl_)([0-9A-F]{1,8}))$")
+
+
+CFLAG_OK = re.compile(r"^(?:-[A-Za-z][A-Za-z0-9_=,.+-]*|[0-9]+)$")
+
+
+def parse_annotations(text: str) -> dict:
+    """The comment annotations of one TU source (the Xenosaga III ledger convention):
+    `@addr NAME 0xVA` (repeatable), `@rodata 0xA 0xB ...` (this TU's .rodata objects in
+    emission order), `@data|@sdata|@bss|@sbss 0xVA` (section bases), `@cflags ...`."""
+    out = dict(addr={}, rodata=[], sect={}, cflags=None)
+    for m in re.finditer(r"@addr\s+([A-Za-z_.$][\w.$]*)\s+(0x[0-9A-Fa-f]+)", text):
+        out["addr"][m.group(1)] = int(m.group(2), 16)
+    for m in re.finditer(r"@rodata((?:\s+0x[0-9A-Fa-f]+)+)", text):
+        out["rodata"] += [int(x, 16) for x in m.group(1).split()]
+    for m in re.finditer(r"@(sdata|data|sbss|bss)\s+(0x[0-9A-Fa-f]+)", text):
+        out["sect"]["." + m.group(1)] = int(m.group(2), 16)
+    m = re.search(r"@cflags\s+([^*\n]+)", text)
+    if m:
+        out["cflags"] = m.group(1).split()
+        bad = [f for f in out["cflags"] if not CFLAG_OK.match(f)]
+        if bad:                                      # the flags reach a shell line in the container
+            raise ValueError(f"@cflags: not a compiler flag: {' '.join(bad)!r}")
+    return out
+
+
+def split_cflags(flags) -> tuple:
+    """(-G flag, extra cc1 flags) from a flag list: `-G 0` and `-G0` both give `-G0`;
+    -O2 is implied by every build, other flags are passed to cc1."""
+    g, extra, it = None, [], iter(list(flags or []))
+    for f in it:
+        if f == "-G":
+            g = "-G" + next(it, "8")
+        elif f.startswith("-G"):
+            g = f
+        if g is not None and not re.fullmatch(r"-G\d+", g):       # this too reaches the shell line
+            raise ValueError(f"not a -G flag: {g!r}")
+        if f == "-G" or f.startswith("-G"):
+            continue
+        elif f in ("-O2",):
+            continue
+        else:
+            if not CFLAG_OK.match(f):                # these reach a shell line in the container
+                raise ValueError(f"not a compiler flag: {f!r}")
+            extra.append(f)
+    return g, extra
+
+
+class Target:
+    """A decomp target described by a decomp-target/1 manifest: the originals, the symbol
+    table, the units, the TUs with per-TU flags and compile contract, the toolchain
+    directory, the ledger. Relative paths are relative to the manifest; `~` and $VARS
+    expand; `root` (optional) names the source tree when the manifest is kept outside it.
+    The xsg-i-decomp layout stays the other adapter (--upstream)."""
+
+    def __init__(self, path):
+        self.path = Path(path).expanduser().resolve()
+        self.root = self.path.parent
+        d = json.loads(self.path.read_text())
+        if d.get("schema") != TARGET_SCHEMA:
+            raise ValueError(f"{self.path}: schema {d.get('schema')!r}, expected {TARGET_SCHEMA}")
+        self.data = d
+        self.name = d.get("name") or self.root.name
+        self.game_dir = self._abs(d.get("game_dir", "."))
+        self.symbols = self._abs(d["symbols"]) if d.get("symbols") else None
+        self.resident = d.get("resident")
+        self.units = d.get("units") or {}
+        self.include = [self._abs(x) for x in d.get("include") or []]
+        self.defines = list(d.get("defines") or [])
+        self.toolchains = self._abs(d["toolchains"]) if d.get("toolchains") else None
+        self.contracts = d.get("contracts") or {}
+        self.default_contract = d.get("default_contract")
+        self.gp = int(str(d["gp"]), 16) if d.get("gp") else None
+        self.ledger = self._abs(d["ledger"]) if d.get("ledger") else None
+        if d.get("root"):                      # a manifest kept outside the tree it describes (a read-only
+            self.root = self._abs(d["root"])   # checkout): TU sources and include roots are relative to `root`,
+            self.include = [self._abs(x) for x in d.get("include") or []]   # everything else to the manifest
+        # other builds of the same program (a demo, a prototype, another region) that a
+        # ledger row's C must reproduce too: {name: {note, units: {unit: {binary, map}}}}
+        self.siblings = d.get("siblings") or {}
+
+    def _abs(self, p) -> Path:
+        q = Path(os.path.expandvars(str(p))).expanduser()
+        return q if q.is_absolute() else (self.root / q)
+
+    def binary(self, unit: str) -> Path:
+        if unit not in self.units:
+            raise KeyError(f"unit {unit!r} not in {self.path} (units: {', '.join(self.units)})")
+        return self.game_dir / self.units[unit]["binary"]
+
+    def sibling(self, name: str, unit: str) -> "dict | None":
+        """{binary, map} of UNIT in sibling build NAME (absolute paths: binary under game_dir,
+        map under the manifest), or None when that build has no such unit."""
+        if name not in self.siblings:
+            raise KeyError(f"sibling {name!r} not in {self.path} (siblings: {', '.join(self.siblings) or 'none'})")
+        u = (self.siblings[name].get("units") or {}).get(unit)
+        if not u:
+            return None
+        return dict(binary=self.game_dir / u["binary"], map=self._abs(u["map"]))
+
+    def tus(self, unit: str) -> list:
+        """[{id, path (absolute), mode, in_scope, flags, contract, unit}] of UNIT, the
+        discover_tus() shape plus the TU's contract name."""
+        out = []
+        for t in self.data.get("tus") or []:
+            if t.get("unit", t.get("id", "").split("/")[0]) != unit:
+                continue
+            out.append(dict(id=t["id"], path=str(self._abs(t["path"])), mode=t.get("mode", "c"),
+                            in_scope=bool(t.get("in_scope", True)), flags=list(t.get("flags") or ["-O2", "-G8"]),
+                            contract=t.get("contract") or self.default_contract,
+                            compiler_profile="ee-gcc2_96", unit=unit))
+        return sorted(out, key=lambda e: e["id"])
+
+    def contract(self, name: "str | None") -> "dict | None":
+        """verify_decomp's contract dict (cc1, ee_as, cc1_flags, as_flags relative to the
+        toolchains directory) for contract NAME, or None."""
+        c = self.contracts.get(name) if name else None
+        if not c:
+            return None
+        return dict(cc1=c["cc1"], ee_as=c["as"], cc1_flags=c.get("cc1_flags", ""),
+                    as_flags=c.get("as_flags", "-EL -m5900 -mabi=eabi -I ."), contract=name)
+
+    def materialize(self, dest: Path, sources=("src",)) -> Path:
+        """A copy of the target for a private sandbox: the source trees in SOURCES copied under
+        DEST, and a manifest whose originals, symbols, toolchains and ledger stay absolute
+        (they are not copied) while sources and include roots point into DEST."""
+        dest = Path(dest)
+        for rel in sources:
+            src = self.root / rel
+            if src.is_dir():
+                shutil.copytree(src, dest / rel, symlinks=True)
+        d = json.loads(json.dumps(self.data))
+        d.pop("root", None)                    # the copy's sources sit next to its manifest
+        d["game_dir"] = str(self.game_dir)
+        for key in ("symbols", "toolchains", "ledger"):
+            if getattr(self, key):
+                d[key] = str(getattr(self, key))
+        for sib in (d.get("siblings") or {}).values():
+            for u in (sib.get("units") or {}).values():
+                if u.get("map"):
+                    u["map"] = str(self._abs(u["map"]))
+        inc = []
+        for x in self.data.get("include") or []:
+            q = self._abs(x)
+            try:
+                inc.append(str(q.relative_to(self.root)))
+            except ValueError:
+                inc.append(str(q))
+        d["include"] = inc
+        out = dest / self.path.name
+        out.write_text(json.dumps(d, indent=1))
+        return out
+
+
+def load_target(path=None) -> "Target | None":
+    """The target named by PATH, else by DECOMP_TARGET, else None."""
+    p = path or os.environ.get("DECOMP_TARGET")
+    return Target(p) if p else None
+
+
+class OverlaySymbols:
+    """A Symbols view with one TU's own names on top (its @addr annotations), and the
+    Ghidra-style auto names (FUN_0012abcd, DAT_00456780, uRam00456780) resolving to the
+    address they spell, so a TU written against a decompiler's names still links."""
+
+    def __init__(self, base: Symbols, extra=None, gp=None):
+        self.base, self.extra = base, dict(extra or {})
+        self.exact, self.stripped, self.foreign = base.exact, base.stripped, base.foreign
+        self.gp = base.gp or (gp or 0)
+
+    def value(self, name: str) -> int:
+        if name in self.extra:
+            return self.extra[name]
+        try:
+            return self.base.value(name)
+        except KeyError:
+            m = AUTO_NAME.match(name)
+            if m:
+                return int(m.group(1) or m.group(2), 16)
+            raise
+
+    def size(self, name: str) -> int:
+        return self.base.size(name)
+
+    def known(self, name: str) -> bool:
+        return name in self.extra or self.base.known(name) or bool(AUTO_NAME.match(name))
+
+
+def target_object(obj: Path, source_text: str, symbols: Symbols, image: bytes, gp=None) -> Object:
+    """The Object for one TU of a target: the TU's @addr names over the table, content
+    anchoring on, its @rodata objects and section bases as explicit anchors."""
+    ann = parse_annotations(source_text or "")
+    syms = OverlaySymbols(symbols, ann["addr"], gp)
+    return Object(obj, syms, image=image, anchors=dict(rodata=ann["rodata"], sect=ann["sect"], gp=syms.gp))
+
+
+def run_target(args, target: Target) -> int:
+    """verify_decomp for a decomp-target/1 manifest: per-TU contracts and flags (annotations
+    win over the manifest), one docker build per contract group, content anchoring."""
+    unit = args.unit
+    binary = args.binary if args.binary_given else target.binary(unit)
+    symbols = args.symbols if args.symbols_given else target.symbols
+    if not symbols or not Path(symbols).is_file():
+        print(f"no symbol table: {symbols} (the target's `symbols`, or --symbols)", file=sys.stderr)
+        return 2
+    toolchains = args.toolchains or (Path(os.environ["DECOMP_TOOLCHAINS"]).expanduser()
+                                     if os.environ.get("DECOMP_TOOLCHAINS") else target.toolchains)
+    compiler = args.compiler or ("contract" if target.contracts and toolchains and Path(toolchains).is_dir() else "stock")
+    if not (args.rootfs / "lib" / "ld-linux.so.2").is_file():
+        print(f"no i386 rootfs at {args.rootfs} (lib/ld-linux.so.2 missing); set EE_ROOTFS or --rootfs", file=sys.stderr)
+        return 2
+    baseline = json.loads(args.baseline.read_text()) if args.baseline else None
+    base_syms = Symbols(symbols, binary=Path(binary).name)
+    if not base_syms.gp and target.gp:
+        base_syms.gp = target.gp
+    image = Path(binary).read_bytes()
+    segments = image_segments(image)
+    if image[:4] != b"\x7fELF" or not segments:
+        print(f"{binary}: not an ELF with PT_LOAD segments", file=sys.stderr)
+        return 2
+    args.work.mkdir(parents=True, exist_ok=True)
+    for stale in stale_runs(args.work, args.docker_timeout):
+        shutil.rmtree(stale, ignore_errors=True)
+    work = args.work / f"run-{os.getpid()}-{int(time.time() * 1000)}"
+    for sub in ("pp", "asm", "obj", "flags"):
+        (work / sub).mkdir(parents=True)
+    print(f"work: {work}\ntarget: {target.path}  unit {unit}  binary {Path(binary).name}  symbols {symbols}")
+    includes = list(target.include) or [target.root]
+    groups, skipped, sources = collections.OrderedDict(), [], {}
+    tags_seen = set()
+    for t in target.tus(unit):
+        if t.get("mode") != "c" or not t.get("in_scope"):
+            continue
+        if args.tu and t["id"] not in args.tu:
+            continue
+        src = Path(t["path"])
+        if not src.exists():
+            skipped.append((t["id"], "missing", [str(src)]))
+            continue
+        text = src.read_text(errors="replace")
+        sources[t["id"]] = text
+        ann = parse_annotations(text)
+        g, extra = split_cflags(ann["cflags"] if ann["cflags"] is not None else t["flags"])
+        tag = t["id"].replace("/", "__")
+        if "__" in t["id"] or tag in tags_seen:      # the build files are named by the tag: it must be unique
+            sys.exit(f"TU id {t['id']!r}: ids may not contain '__' or repeat")
+        tags_seen.add(tag)
+        cpp = subprocess.run(["clang", "-E", "-P", "-DSKIP_ASM"] + [f"-D{d}" for d in target.defines + list(args.define)]
+                             + [a for d in includes for a in ("-I", str(d))] + [str(src), "-o", str(work / "pp" / f"{tag}.i")],
+                             capture_output=True, text=True)
+        if cpp.returncode:
+            skipped.append((t["id"], "preprocess", cpp.stderr.strip().splitlines()[:1]))
+            continue
+        cname = t.get("contract") if compiler == "contract" else "stock"
+        key = (cname, " ".join(extra))
+        groups.setdefault(key, []).append(dict(tu=t["id"], tag=tag, path=t["path"], flags=[g or "-G8"] + extra,
+                                               g=g or "-G8"))
+    jobs = [j for js in groups.values() for j in js]
+    print(f"preprocessed {len(jobs)} TU(s) in {len(groups)} build group(s); {len(skipped)} skipped  [compiler: {compiler}]")
+    if not jobs:
+        print("no TU to verify", file=sys.stderr)
+        return 1
+    build_fails, used = [], {}
+    for k, ((cname, extra), js) in enumerate(groups.items()):
+        gw = work / f"g{k}"
+        for sub in ("pp", "asm", "obj", "flags"):
+            (gw / sub).mkdir(parents=True)
+        for j in js:
+            shutil.copyfile(work / "pp" / f"{j['tag']}.i", gw / "pp" / f"{j['tag']}.i")
+            (gw / "flags" / j["tag"]).write_text(j["g"])
+        contract = None
+        if compiler == "contract":
+            contract = target.contract(cname)
+            if contract is None:
+                print(f"contract {cname!r} is not defined in {target.path}", file=sys.stderr)
+                return 2
+            contract = dict(contract, cc1_flags=(contract["cc1_flags"] + (" " + extra if extra else "")).strip())
+            for tool in (contract["cc1"], contract["ee_as"]):
+                if not (Path(toolchains) / tool).is_file():
+                    print(f"contract {cname}: {tool} not under {toolchains}", file=sys.stderr)
+                    return 2
+        used[f"g{k}"] = dict(contract=cname, extra=extra, tus=[j["tu"] for j in js],
+                             cc1=contract["cc1"] if contract else STOCK_CC1, ee_as=contract["ee_as"] if contract else STOCK_AS,
+                             cc1_flags=contract["cc1_flags"] if contract else extra, as_flags=contract["as_flags"] if contract else "")
+        rc, fails, tail = docker_build(gw, args.rootfs, js, args.image, compiler, toolchains, args.docker_timeout,
+                                       contract, stock_cc1_flags=extra if compiler != "contract" else "")
+        if rc != 0:
+            print(f"docker run failed (rc {rc}); nothing was verified\n{tail}", file=sys.stderr)
+            return 2
+        build_fails += fails
+        for j in js:                                  # one flat tree, as match_kit and the report expect
+            for sub, ext in (("obj", ".o"), ("asm", ".s"), ("asm", ".cc1err"), ("asm", ".aserr")):
+                f = gw / sub / f"{j['tag']}{ext}"
+                if f.exists():
+                    shutil.copyfile(f, work / sub / f"{j['tag']}{ext}")
+            (work / "flags" / j["tag"]).write_text(" ".join(j["flags"]))
+    failed = {l.split()[1] for l in build_fails if not l.startswith("ASWARN")}
+    warned = {l.split()[1] for l in build_fails if l.startswith("ASWARN")}
+    warnings = [dict(tu=l.split()[1].replace("__", "/"), msg="assembler wrote to stderr") for l in build_fails
+                if l.startswith("ASWARN")]
+    if compiler == "contract":
+        failed |= warned
+    totals, results, per_tu, matched, function_skips = collections.Counter(), [], {}, {}, []
+    tier_a = {}
+    for job in jobs:
+        if job["tag"] in failed:
+            per_tu[job["tu"]] = {"build": "fail"}
+            totals["build-fail"] += 1
+            continue
+        obj = work / "obj" / f"{job['tag']}.o"
+        if not obj.exists():
+            totals["build-fail"] += 1
+            continue
+        o = target_object(obj, sources.get(job["tu"], ""), base_syms, image, target.gp)
+        counts = collections.Counter()
+        for f in o.funcs:
+            if not o.is_clean(f):
+                counts["skip"] += 1
+                totals["skip"] += 1
+                lo, hi = o.span(f)
+                function_skips.append(dict(tu=job["tu"], func=f["name"], why="; ".join(sorted(
+                    {why for off_, why in o.unresolved if lo <= off_ < hi}))[:300]))
+                continue
+            off = image_offset(segments, f["va"])
+            if off is None:
+                counts["skip"] += 1
+                totals["skip"] += 1
+                function_skips.append(dict(tu=job["tu"], func=f["name"], why="address outside the loaded image"))
+                continue
+            orig = image[off:off + f["size"]]
+            ours = o.bytes_for(f)
+            kind, detail = judge_sizes(*classify(ours, orig), f.get("obj_size") or f["size"], f["size"], compiler)
+            if kind == "size-diff" and delay_slot(o.object_bytes(f), orig):
+                kind, detail = "delay-slot", f"{(f['size'] - f['obj_size']) // 4} delay slot(s) filled by the assembler"
+            counts[kind] += 1
+            totals[kind] += 1
+            if kind == "match":
+                matched.setdefault(job["tu"], []).append(f["name"])
+                tier_a.setdefault(job["tu"], []).append(dict(name=f["name"], va=f"{f['va']:#x}", size=f["size"]))
+            else:
+                results.append(dict(tu=job["tu"], func=f["name"], va=f"{f['va']:#x}", size=f["size"],
+                                    kind=kind, detail=detail))
+        counts["nosym"] += len(o.unknown)
+        totals["nosym"] += len(o.unknown)
+        per_tu[job["tu"]] = dict(counts)
+    print("=" * 74)
+    print(f"Target byte verification -- {target.name} ({compiler})")
+    print("=" * 74)
+    for tu in sorted(per_tu, key=lambda t: -per_tu[t].get("match", 0)):
+        c = per_tu[tu]
+        print(f"  {tu:<24} " + ("BUILD FAILED" if c.get("build") == "fail" else
+                                "  ".join(f"{k}={v}" for k, v in sorted(c.items()) if v)))
+    n_match, n_diff = totals["match"], sum(totals[k] for k in DIFF_KINDS)
+    pct = 100.0 * n_match / (n_match + n_diff) if (n_match + n_diff) else 0.0
+    print("-" * 74)
+    print(f"  identical: {n_match}/{n_match + n_diff}  ({pct:.1f}%)   differing: {n_diff}   unverifiable: "
+          f"{totals['skip']}   unknown symbol: {totals['nosym']}   build failures: {totals['build-fail']}")
+    if args.verbose:
+        for r in results:
+            print(f"    {r['tu']:<24} {r['func']:<30} {r['kind']:<11} {r['detail']}")
+        for sk in function_skips:
+            print(f"    {sk['tu']:<24} {sk['func']:<30} skip        {sk['why']}")
+    regressions = baseline_regressions(baseline, per_tu, matched) if baseline else []
+    for line in regressions:
+        print(f"  REGRESSION {line}")
+    if args.out:
+        args.out.write_text(json.dumps(dict(
+            target=str(target.path), unit=unit, compiler=compiler, work=str(work), binary=str(binary),
+            symbols=str(symbols), toolchains=str(toolchains) if compiler == "contract" else None, groups=used,
+            segments=[dict(va=f"{va:#x}", off=off, filesz=fs, memsz=ms) for va, off, fs, ms in segments],
+            rootfs=str(args.rootfs), jobs=len(jobs), totals=dict(totals), per_tu=per_tu, matched=matched,
+            tier_a=tier_a, mismatches=results, regressions=regressions, warnings=warnings,
+            skipped=[dict(tu=t, why=w, msg=m) for t, w, m in skipped], function_skips=function_skips), indent=1))
+        print(f"\nwrote {args.out}")
+    return 1 if run_failed(totals, compiler, regressions) else 0
+
+
 def self_test() -> int:
     """Network-free checks of the classifier, the build scripts and the baseline rule."""
     def w(*vals):
@@ -1030,6 +1790,165 @@ def self_test() -> int:
     stub.sections[1]["off"] = 0
     checks["gp0"] = stub._gp0() == 0x4000
     checks["known"] = Symbols.known.__doc__ is not None
+    # target mode: annotations, flags, the manifest, TU-scoped names
+    ann = parse_annotations("/* @addr sBuf 0x69e36c\n * @addr helper 0x19ae28\n * @rodata 0x68dea8 0x68deb8\n"
+                            " * @sbss 0x69e370\n * @cflags -O2 -G 0 -fno-strict-aliasing */")
+    checks["annotations"] = (ann["addr"] == {"sBuf": 0x69e36c, "helper": 0x19ae28} and ann["rodata"] == [0x68dea8, 0x68deb8]
+                             and ann["sect"] == {".sbss": 0x69e370} and ann["cflags"] == ["-O2", "-G", "0", "-fno-strict-aliasing"])
+    checks["split-cflags"] = (split_cflags(ann["cflags"]) == ("-G0", ["-fno-strict-aliasing"])
+                              and split_cflags(["-O2", "-G8"]) == ("-G8", []))
+    class _B:
+        exact, stripped, foreign, gp = {}, {}, {}, 0x6a2df0
+        def value(self, n):
+            if n == "g": return 0x400000
+            raise KeyError(n)
+        def size(self, n): return 4
+        def known(self, n): return n == "g"
+    ov = OverlaySymbols(_B(), {"sBuf": 0x69e36c})
+    checks["overlay-symbols"] = (ov.value("sBuf") == 0x69e36c and ov.value("g") == 0x400000
+                                 and ov.value("FUN_00186448") == 0x186448 and ov.known("DAT_00645820") and ov.gp == 0x6a2df0)
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "src" / "main").mkdir(parents=True)
+        (root / "src" / "main" / "a.c").write_text("int a;")
+        (root / "t.json").write_text(json.dumps(dict(
+            schema=TARGET_SCHEMA, name="t", game_dir="ELF", symbols="symbols/x.csv", units=dict(main=dict(binary="G.ELF")),
+            include=["src/main"], toolchains="tc", default_contract="c",
+            contracts=dict(c={"cc1": "cc/bin/cc1", "as": "as/bin/ee-as", "cc1_flags": "-fno-builtin", "as_flags": "-EL -g"}),
+            ledger="src/matched.tsv", tus=[dict(id="main/a", unit="main", path="src/main/a.c", flags=["-O2", "-G0"])])))
+        t = Target(root / "t.json")
+        tus = t.tus("main")
+        checks["target-manifest"] = (t.binary("main") == root.resolve() / "ELF" / "G.ELF" and len(tus) == 1
+                                     and tus[0]["contract"] == "c" and tus[0]["flags"] == ["-O2", "-G0"]
+                                     and Path(tus[0]["path"]).is_absolute() and t.ledger == root.resolve() / "src/matched.tsv")
+        c = t.contract("c")
+        checks["target-contract"] = c == dict(cc1="cc/bin/cc1", ee_as="as/bin/ee-as", cc1_flags="-fno-builtin",
+                                              as_flags="-EL -g", contract="c") and t.contract("nope") is None
+        m = t.materialize(root / "sb", sources=("src",))
+        t2 = Target(m)
+        checks["target-materialize"] = ((root / "sb" / "src" / "main" / "a.c").is_file() and t2.game_dir == t.game_dir
+                                        and t2.symbols == t.symbols and Path(t2.tus("main")[0]["path"]).parent.parent.parent == (root / "sb").resolve())
+    # content anchoring: a reference is accepted only where the original holds the object's bytes
+    st = Object.__new__(Object)
+    st.anchors, st._refs = dict(rodata=[], sect={}, gp=0), None
+    st._raw = b"\0" * 16 + b"hi!\0" + b"\0" * 12
+    st.sections = [dict(name="", typ=0, off=0, size=0, info=0), dict(name=".rodata", typ=1, off=16, size=4, info=0)]
+    st.symbols, st.relocs, st.text = [], [], b""
+    img = bytearray(0x40)
+    img[:4] = b"\x7fELF"
+    struct.pack_into(E + "I", img, 0x1C, 0x34)
+    struct.pack_into(E + "HH", img, 0x2A, 0x20, 1)
+    img += bytearray(0x100)
+    img[0x100:0x104] = b"hi!\0"
+    struct.pack_into(E + "8I", img, 0x34, 1, 0x100, 0x500000, 0x500000, 0x10, 0x10, 4, 4)
+    st.image = bytes(img)
+    st._segments = st._image_segments()
+    st._site_va = lambda site: 0x500000
+    good = st._anchored(1, 0, ("hilo", 0, 0))
+    st._site_va = lambda site: 0x500004
+    bad = st._anchored(1, 0, ("hilo", 0, 0))
+    checks["anchor-content"] = good == (0x500000, None) and bad[0] is None and bad[1].startswith("content")
+    # trailing alignment padding may differ (at most align-1 zero bytes of ours), nothing else
+    st._raw = b"\0" * 16 + b"hi!\0" + b"\0" * 12
+    st.sections[1].update(size=16, align=16)
+    st._refs = None
+    pimg2 = bytearray(img)
+    pimg2[0x100:0x110] = b"hi!\0" + b"\0" * 4 + b"\x90\xb2\x1e\x00" * 2      # the next object starts 8 bytes in
+    st.image = bytes(pimg2)
+    st._site_va = lambda site: 0x500000
+    padded = st._anchored(1, 0, ("hilo", 0, 0))
+    pimg2[0x101] = 0x7A                                                     # a real byte differs
+    st.image = bytes(pimg2)
+    real = st._anchored(1, 0, ("hilo", 0, 0))
+    st.sections[1].update(align=4)                                          # padding longer than the alignment allows
+    pimg2[0x101] = ord("i")
+    st.image = bytes(pimg2)
+    toolong = st._anchored(1, 0, ("hilo", 0, 0))
+    checks["anchor-padding"] = padded == (0x500000, None) and real[0] is None and toolong[0] is None
+    st.sections[1].update(size=4, align=1)
+    st._raw, st._refs, st.image = b"\0" * 16 + b"hi!\0" + b"\0" * 12, None, bytes(img)
+    # HI16/LO16 pairing by instruction offset, not table order (the -g assembler lists a HI16 late)
+    pr = Object.__new__(Object)
+    pr.anchors = dict()
+    pr.text_idx = 0
+    pr.symbols = [dict(name="", typ=STT_SECTION, shndx=1, val=0, size=0), dict(name="f", typ=STT_FUNC, shndx=0, val=0, size=16),
+                  dict(name="g", typ=STT_FUNC, shndx=0, val=16, size=8)]
+    pr.text = struct.pack(E + "6I", 0x3C040000, 0x24840068, 0, 0, 0x24840010, 0)
+    pr.sections = [dict(name=".text", typ=1, off=0, size=24, info=0)]
+    pr._raw = pr.text
+    pr.relocs = [(4, (0 << 8) | R_MIPS_LO16), (16, (0 << 8) | R_MIPS_LO16), (0, (0 << 8) | R_MIPS_HI16)]
+    pr._fbounds = None
+    checks["pair-by-offset"] = pr._pair_addend(2, 0, 0x3C040000) == (0x68, 4)
+    # two %hi before their %lo (lui a0; lui a1; addiu a1; addiu a0): paired by the register loaded
+    pr.symbols[1]["size"], pr.symbols = 24, pr.symbols[:2]
+    pr.text = pr._raw = struct.pack(E + "6I", 0x3C040000, 0x3C050000, 0x24A50020, 0x24840010, 0, 0)
+    pr.relocs = [(0, R_MIPS_HI16), (4, R_MIPS_HI16), (8, R_MIPS_LO16), (12, R_MIPS_LO16)]
+    pr._fbounds = None
+    checks["pair-by-register"] = (pr._pair_addend(0, 0, 0x3C040000) == (0x10, 12)
+                                  and pr._pair_addend(1, 4, 0x3C050000) == (0x20, 8))
+    # a pointer inside anchored data is compared, and data that is nothing but pointers the
+    # table cannot resolve proves nothing
+    pt = Object.__new__(Object)
+    pt.anchors, pt._refs = dict(rodata=[], sect={}, gp=0), None
+    pt._raw = b"\0" * 32 + struct.pack(E + "II", 0, (1 << 8) | R_MIPS_32)
+    pt.sections = [dict(name="", typ=0, off=0, size=0, info=0), dict(name=".data", typ=1, off=16, size=4, info=0),
+                   dict(name=".rel.data", typ=SHT_REL, off=32, size=8, info=1)]
+    pt.symbols = [dict(name="", typ=STT_SECTION, shndx=1, val=0, size=0), dict(name="fn", typ=STT_FUNC, shndx=0, val=0, size=0)]
+    pt.relocs, pt.text = [], b""
+    pimg = bytearray(img)
+    struct.pack_into(E + "I", pimg, 0x100, 0x123456)
+    pt.image = bytes(pimg)
+    pt._segments = pt._image_segments()
+    pt._site_va = lambda site: 0x500000
+    class _P:
+        def __init__(self, v): self.v = v
+        def value(self, n):
+            if self.v is None: raise KeyError(n)
+            return self.v
+    pt.syms = _P(None)
+    only = pt._anchored(1, 0, ("hilo", 0, 0))
+    pt.syms = _P(0x123456)
+    same = pt._anchored(1, 0, ("hilo", 0, 0))
+    pt.syms = _P(0x123460)
+    other = pt._anchored(1, 0, ("hilo", 0, 0))
+    checks["anchor-pointers"] = (only[0] is None and "only pointers" in only[1] and same == (0x500000, None)
+                                 and other[0] is None and other[1].startswith("content"))
+    # a struct with an int and a pointer to an unnamed string: the string the original's
+    # pointer leads to must be this object's string
+    sp = Object.__new__(Object)
+    sp.anchors, sp._refs, sp._site_stack = dict(rodata=[], sect={}, gp=0), None, []
+    sp._raw = b"\0" * 16 + struct.pack(E + "II", 1, 0) + b"abc\0" + b"\0" * 4 + struct.pack(E + "II", 4, (1 << 8) | R_MIPS_32)
+    sp.sections = [dict(name="", typ=0, off=0, size=0, info=0), dict(name=".data", typ=1, off=16, size=8, info=0),
+                   dict(name=".rodata", typ=1, off=24, size=4, info=0), dict(name=".rel.data", typ=SHT_REL, off=32, size=8, info=1)]
+    sp.symbols = [dict(name="", typ=STT_SECTION, shndx=1, val=0, size=0), dict(name="", typ=STT_SECTION, shndx=2, val=0, size=0)]
+    sp.relocs, sp.text = [], b""
+    sp.syms = _P(None)
+    simg = bytearray(0x40)
+    simg[:4] = b"\x7fELF"
+    struct.pack_into(E + "I", simg, 0x1C, 0x34)
+    struct.pack_into(E + "HH", simg, 0x2A, 0x20, 1)
+    simg += bytearray(0x100)
+    struct.pack_into(E + "8I", simg, 0x34, 1, 0x100, 0x500000, 0x500000, 0x40, 0x40, 4, 4)
+    struct.pack_into(E + "II", simg, 0x100, 1, 0x500020)
+    simg[0x120:0x124] = b"abc\0"
+    sp.image = bytes(simg)
+    sp._segments = sp._image_segments()
+    sp._site_va = lambda site: 0x500000
+    right = sp._anchored(1, 0, ("hilo", 0, 0))
+    simg[0x120:0x124] = b"abd\0"
+    sp.image = bytes(simg)
+    wrong = sp._anchored(1, 0, ("hilo", 0, 0))
+    checks["anchor-string-pointer"] = right == (0x500000, None) and wrong[0] is None and wrong[1].startswith("content")
+    try:
+        parse_annotations("/* @cflags -O2 ; touch /work/x */")
+        checks["cflags-refused"] = False
+    except ValueError:
+        try:
+            split_cflags(["-O2", "$(id)"])
+            checks["cflags-refused"] = False
+        except ValueError:
+            checks["cflags-refused"] = True
     base = dict(matched={"main/tu1": ["a", "b"]}, per_tu={"main/tu1": {"match": 2}, "main/tu2": {"match": 3}})
     checks["baseline-fn"] = baseline_regressions(base, {"main/tu1": {"match": 1}}, {"main/tu1": ["a"]}) == ["main/tu1 b"]
     checks["baseline-count"] = baseline_regressions(base, {"main/tu2": {"match": 2}}, {"main/tu2": ["x", "y"]}) == ["main/tu2 match count 2 < 3"]
@@ -1084,11 +2003,24 @@ def main() -> int:
     ap.add_argument("--image", default="debian:bookworm-slim")
     ap.add_argument("--out", type=Path, help="write a JSON report here")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--target", type=Path, default=None,
+                    help="a decomp-target/1 manifest (default: DECOMP_TARGET when neither --upstream nor --src is "
+                         "given): originals, symbols, units, per-TU contracts and flags, toolchains")
     args = ap.parse_args()
     if args.self_test:
         return self_test()
+    args.symbols_given = any(x == "--symbols" or x.startswith("--symbols=") for x in sys.argv[1:])
+    args.binary_given = any(x == "--binary" or x.startswith("--binary=") for x in sys.argv[1:])
+    target = None
+    if args.target or (args.upstream is None and not args.src and os.environ.get("DECOMP_TARGET")):
+        try:
+            target = load_target(args.target)
+        except (OSError, ValueError, KeyError) as e:
+            print(f"target: {e}", file=sys.stderr)
+            return 2
+        return run_target(args, target)
     if args.upstream is None and not args.src:
-        ap.error("--upstream or --src is required (or --self-test)")
+        ap.error("--upstream, --src or --target is required (or --self-test)")
 
     up = args.upstream
     if args.src:

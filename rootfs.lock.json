@@ -1,6 +1,6 @@
 {
  "schema": "rootfs-lock/1",
- "doc": "Measured identities of the two toolchains verify_decomp.py can drive: `stock` under EE_ROOTFS (the independent, unpatched ee-gcc 2.96) and `contract` under <upstream>/.work/toolchains (the decomp's pinned cc1 + la29 ee-as). tools/doctor.py compares these hashes with the files on disk (the stock section; the contract section records the fsv3 pair measured here, the upstream has since moved to an fsv8 cc1, which verify_decomp.py now reads from the upstream's config/toolchain-identity.json). `root_measured` names the root by its environment variable or default, never a machine path. Regenerate by hand when a payload changes; `pinned_sha256` comes from config/toolchain-identity.json.",
+ "doc": "Measured identities of the two toolchains verify_decomp.py can drive: `stock` under EE_ROOTFS (the independent, unpatched ee-gcc 2.96) and `contract` under <upstream>/.work/toolchains (the decomp's pinned cc1 + la29 ee-as). No tool checks these hashes yet: compare them by hand with `shasum -a 256` (the stock section; the contract section records the fsv3 pair measured here, the upstream has since moved to an fsv8 cc1, which verify_decomp.py now reads from the upstream's config/toolchain-identity.json). `root_measured` names the root by its environment variable or default, never a machine path. Regenerate by hand when a payload changes; `pinned_sha256` comes from config/toolchain-identity.json.",
  "measured": "2026-09-27T18:47:14",
  "box": {
   "image": "debian:bookworm-slim",

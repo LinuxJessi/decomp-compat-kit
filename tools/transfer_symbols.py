@@ -214,6 +214,76 @@ def transfer(donor: Image, funcs, acceptor: Image, anchor_words=8, loose=False, 
     return rows
 
 
+def drop_order_outliers(rows) -> int:
+    """Sibling builds keep link order, so the uniquely placed rows must climb in the acceptor
+    as they climb in the donor. Keep the longest chain that does; every other unique row is a
+    false hit (a body that changed in this build, found again somewhere else) and is marked
+    ambiguous ("<order>") so no consumer uses it. Returns how many rows it marked."""
+    import bisect
+    uniq = sorted((r for r in rows if len(r["hits"]) == 1 and not r["ambiguous"]), key=lambda r: r["donor_va"])
+    tails, tail_idx, parent = [], [], [-1] * len(uniq)
+    for i, r in enumerate(uniq):
+        a = r["hits"][0][0]
+        j = bisect.bisect_left(tails, a)
+        if j == len(tails):
+            tails.append(a)
+            tail_idx.append(i)
+        else:
+            tails[j], tail_idx[j] = a, i
+        parent[i] = tail_idx[j - 1] if j else -1
+    keep, i = set(), tail_idx[-1] if tail_idx else -1
+    while i >= 0:
+        keep.add(i)
+        i = parent[i]
+    marked = 0
+    for i, r in enumerate(uniq):
+        if i not in keep:
+            r["ambiguous"] = ["<order>"]
+            marked += 1
+    return marked
+
+
+def resolve_by_order(rows) -> int:
+    """For a SIBLING acceptor (another build of the same program: same sources, same link
+    order, functions shifted by whatever was inserted or removed before them), place the
+    rows with several hits, or a body several donors share, by their neighbours: the hit
+    that lies strictly between the acceptor addresses of the nearest uniquely placed
+    donors before and after it, when exactly one does, and, when those two neighbours
+    moved by the same shift, only the hit at that shift. A resolved row keeps one hit and
+    loses its ambiguity; nothing is guessed when the window holds no hit or several.
+    Repeats until nothing changes. Returns how many rows it placed."""
+    placed = 0
+    drop_order_outliers(rows)
+    while True:
+        order = sorted(rows, key=lambda r: r["donor_va"])
+        anchors = [(i, r) for i, r in enumerate(order) if len(r["hits"]) == 1 and not r["ambiguous"]]
+        taken = {r["hits"][0][0] for _i, r in anchors}
+        changed = 0
+        k = 0
+        for i, r in enumerate(order):
+            while k < len(anchors) and anchors[k][0] < i:
+                k += 1
+            if len(r["hits"]) == 1 and not r["ambiguous"]:
+                continue
+            prev = anchors[k - 1][1] if k > 0 else None
+            nxt = anchors[k][1] if k < len(anchors) else None
+            if prev is None or nxt is None:
+                continue
+            lo = prev["hits"][0][0] + prev["size"]
+            hi = nxt["hits"][0][0]
+            window = [h for h in r["hits"] if lo <= h[0] and h[0] + r["size"] <= hi and h[0] not in taken]
+            dp = prev["hits"][0][0] - prev["donor_va"]
+            if dp == nxt["hits"][0][0] - nxt["donor_va"]:
+                window = [h for h in window if h[0] - r["donor_va"] == dp]
+            if len(window) == 1:
+                r["hits"], r["ambiguous"], r["resolved"] = window, [], "order"
+                taken.add(window[0][0])
+                changed += 1
+        placed += changed
+        if not changed:
+            return placed
+
+
 # ------------------------------------------------------------------ output
 
 def write_tsv(rows, out):
@@ -314,6 +384,21 @@ def self_test() -> int:
     ref = {("fn", funcs[0][1]): {rows[0]["hits"][0][0]} if rows else set(), ("ghost", 0x1): {0x2}}
     c = compare(rows, ref)
     checks["compare"] = c["reproduced"] == 1 and c["missed"] == 1 and c["new"] == 0
+    # sibling ordering: a, (b or c: one shared body), d; the acceptor shifts everything by 0x100
+    sib = [dict(name="a", donor_va=0x1000, size=16, hits=[(0x1100, 4)], ambiguous=[]),
+           dict(name="b", donor_va=0x1010, size=8, hits=[(0x1110, 2), (0x1120, 2), (0x5000, 2)], ambiguous=["c"]),
+           dict(name="c", donor_va=0x1020, size=8, hits=[(0x1110, 2), (0x1120, 2), (0x5000, 2)], ambiguous=["b"]),
+           dict(name="d", donor_va=0x1030, size=16, hits=[(0x1130, 4)], ambiguous=[]),
+           dict(name="e", donor_va=0x1040, size=8, hits=[(0x1140, 2), (0x6000, 2)], ambiguous=[])]
+    sib.append(dict(name="f", donor_va=0x1050, size=8, hits=[(0x9000, 2)], ambiguous=[]))   # out of order
+    sib.append(dict(name="g", donor_va=0x1060, size=8, hits=[(0x1160, 2)], ambiguous=[]))
+    n = resolve_by_order(sib)
+    checks["sibling-outlier"] = sib[5]["ambiguous"] == ["<order>"] and not sib[6]["ambiguous"]
+    checks["sibling-order"] = (n == 3 and sib[1]["hits"] == [(0x1110, 2)] and sib[2]["hits"] == [(0x1120, 2)]
+                               and not sib[1]["ambiguous"] and sib[4]["hits"] == [(0x1140, 2)])
+    tail = [dict(name="x", donor_va=0x10, size=8, hits=[(0x110, 2)], ambiguous=[]),
+            dict(name="y", donor_va=0x20, size=8, hits=[(0x120, 2), (0x900, 2)], ambiguous=[])]
+    checks["sibling-no-guess-at-end"] = resolve_by_order(tail) == 0 and len(tail[1]["hits"]) == 2
     ok = all(checks.values())
     print("self-test", "ok" if ok else "FAIL", checks)
     return 0 if ok else 1
@@ -337,6 +422,9 @@ def main() -> int:
     ap.add_argument("--splat", type=Path, help="write the acceptor's names in splat symbol format")
     ap.add_argument("--all-hits", action="store_true", help="--splat also emits ambiguous and multi-hit rows")
     ap.add_argument("--compare", type=Path, help="reference matches (name, donor_va, size, acceptor_vas)")
+    ap.add_argument("--sibling", action="store_true",
+                    help="the acceptor is another build of the same program (a demo, a prototype, another "
+                         "region): place multi-hit and ambiguous rows by link order (resolve_by_order)")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
     if args.self_test:
@@ -356,6 +444,8 @@ def main() -> int:
     t0 = time.time()
     rows = transfer(donor, funcs, acceptor, args.anchor_words, args.mask == "loose", args.min_identical)
     rows.sort(key=lambda r: r["donor_va"])
+    if args.sibling:
+        print(f"sibling: {resolve_by_order(rows)} multi-hit/ambiguous row(s) placed by link order")
     if args.out:
         with open(args.out, "w") as fh:
             write_tsv(rows, fh)

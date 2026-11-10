@@ -40,6 +40,13 @@ Rules learned from the first agent test (docs/agent-matching.md):
     and placeholder names are cheats even when the bytes match;
   * CHEAT and REGRESSION forms never count as progress and are never `best`.
 
+Targets: DECOMP_TARGET names a decomp-target/1 manifest (docs/TOOLS.md "Targets") for a tree
+without the xsg-i-decomp layout; it supplies the upstream root, the originals, the unit's
+binary, the resident image, the symbol table and the contract toolchains (each still
+overridable by its own variable), and a sandbox is a copy of the target's sources with a
+manifest pointing back at the originals. DECOMP_SYMBOLS overrides the symbol table in either
+mode (default: the kit's symbols/symbols.csv, Xenosaga I).
+
 Environment: DECOMP_UPSTREAM (the decomp checkout; default: the repository root when
 this kit lives in <repo>/kit/compat, else ../xsg-i-decomp next to it), DECOMP_GAME_DIR
 (folder holding the original), DECOMP_BINARY (its file name, default SLUS_204.69; also
@@ -70,7 +77,8 @@ KIT = Path(__file__).resolve().parents[1]
 UPSTREAM = Path(os.environ.get('DECOMP_UPSTREAM') or (KIT.parents[1] if KIT.parent.name == 'kit'
                                                      else KIT.parent / 'xsg-i-decomp')).expanduser()
 GAME = Path(os.environ.get('DECOMP_GAME_DIR', '.')).expanduser()
-SYMBOLS = KIT / 'symbols' / 'symbols.csv'
+SYMBOLS = Path(os.environ['DECOMP_SYMBOLS']).expanduser() if os.environ.get('DECOMP_SYMBOLS') \
+    else KIT / 'symbols' / 'symbols.csv'
 ROOTFS = Path(os.environ.get('EE_ROOTFS', Path.home() / 'ee-rootfs')).expanduser()
 SANDBOXES = Path(os.environ.get('DECOMP_SANDBOXES', Path.home() / '.cache' / 'decomp-match')).expanduser()
 UNIT = os.environ.get('DECOMP_UNIT', 'main')                       # the upstream unit the sandbox judges
@@ -103,6 +111,24 @@ def verifier():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _target():
+    """The decomp-target/1 manifest named by DECOMP_TARGET, or None (the xsg-i-decomp layout)."""
+    path = os.environ.get('DECOMP_TARGET')
+    return verifier().Target(path) if path else None
+
+
+TARGET = _target()
+if TARGET is not None:
+    UPSTREAM = Path(os.environ['DECOMP_UPSTREAM']).expanduser() if os.environ.get('DECOMP_UPSTREAM') else TARGET.root
+    GAME = Path(os.environ['DECOMP_GAME_DIR']).expanduser() if os.environ.get('DECOMP_GAME_DIR') else TARGET.game_dir
+    if not os.environ.get('DECOMP_BINARY') and UNIT in TARGET.units:
+        BINARY = TARGET.units[UNIT]['binary']
+    if not os.environ.get('DECOMP_RESIDENT') and TARGET.resident:
+        RESIDENT = TARGET.resident
+    if not os.environ.get('DECOMP_SYMBOLS') and TARGET.symbols:
+        SYMBOLS = TARGET.symbols
 
 
 def binary():
@@ -140,6 +166,8 @@ def toolchains_dir():
     env = os.environ.get('DECOMP_TOOLCHAINS')
     if env:
         return Path(env).expanduser()
+    if TARGET is not None:
+        return TARGET.toolchains
     local = UPSTREAM / '.work' / 'toolchains'
     return local if local.is_dir() else None
 
@@ -149,7 +177,19 @@ def contract_available(toolchains=None):
     layout named by DECOMP_CONTRACT_CC1/DECOMP_CONTRACT_AS, else the upstream's
     config/toolchain-identity.json, else the kit defaults (CONTRACT_CC1/CONTRACT_AS)."""
     base = toolchains or toolchains_dir()
+    if TARGET is not None:
+        return bool(base) and target_contracts_ok(TARGET, base)
     return bool(base) and verifier().resolve_contract(base, UPSTREAM) is not None
+
+
+def target_contracts_ok(target, base):
+    """True when every contract the target's TUs name has both tools under BASE."""
+    names = {t.get('contract') for unit in target.units for t in target.tus(unit)} - {None}
+    for name in names or {target.default_contract}:
+        c = target.contract(name)
+        if c is None or not (Path(base) / c['cc1']).is_file() or not (Path(base) / c['ee_as']).is_file():
+            return False
+    return True
 
 
 def default_compiler():
@@ -180,11 +220,21 @@ def defines(text, name):
     return bool(stub.search(text)) or function_text(text, name) is not None
 
 
-def locate(name, upstream=UPSTREAM, warn=None):
+def locate(name, upstream=UPSTREAM, warn=None, target=None):
     """(tu id, source path) of the in-scope C-mode TU that defines NAME (INCLUDE_ASM stub
     or C body), over the TUs of config/tu-build.json + the per-TU ledgers (the compile
-    manifest only as a stale fallback, with a warning)."""
+    manifest only as a stale fallback, with a warning), or over a target's TUs (the path
+    then relative to the manifest's directory)."""
     warn = warn or (lambda m: print(m, file=sys.stderr))
+    target = TARGET if target is None else target
+    if target is not None:
+        for entry in target.tus(UNIT):
+            path = Path(entry['path'])
+            if entry['mode'] != 'c' or not entry['in_scope'] or not path.is_file():
+                continue
+            if defines(path.read_text(errors='replace'), name):
+                return entry['id'], str(path.relative_to(target.root))
+        sys.exit(f'{name}: no in-scope C TU of the target {target.path} defines it')
     for entry in verifier().discover_tus(upstream, UNIT, warn=warn):
         path = upstream / entry['path']
         if entry['mode'] != 'c' or not entry['in_scope'] or not path.is_file():
@@ -525,7 +575,8 @@ def card_data(name, tu=None, path=None, source=None):
             siblings.append(proto)
         if len(siblings) == 3:
             break
-    decls = grep_declarations(callees + globals_, [UPSTREAM / 'include', UPSTREAM / 'src'])
+    roots = ([*TARGET.include, TARGET.root / 'src'] if TARGET is not None else [UPSTREAM / 'include', UPSTREAM / 'src'])
+    decls = grep_declarations(callees + globals_, roots)
     hints = enrich_hints(name, va)
     return dict(name=name, va=f'{va:#x}', size=size, tu=tu, path=path, state=entry.get('state'),
                 category=entry.get('category'), size_class=size_class(size, cop2), cop2=cop2,
@@ -596,6 +647,19 @@ def probe(name):
                 '(run the kit through its venv, or pip install rabbitizer==1.16.2)']
     vd = verifier()
     syms = vd.Symbols(SYMBOLS, binary=BINARY)
+    data_ranges = []
+    if TARGET is not None:                     # a target: the TU's @addr names count, and initialised
+        try:                                   # data is resolved by content at check time
+            _tu, rel = locate(name)
+            syms = vd.OverlaySymbols(syms, vd.parse_annotations((TARGET.root / rel).read_text(errors='replace'))['addr'],
+                                     TARGET.gp)
+        except SystemExit:
+            pass
+        image = binary().read_bytes()
+        entry = entry_va(image)
+        segments = image_segments(image)
+        data_ranges = [(sva, sva + filesz) for sva, _o, filesz, _m in segments
+                       if not sva <= entry < sva + filesz]
     by_name, by_va, starts = load_symbols()
     va, size, rows = disassemble(name)
     indirect = any(t.split()[0] == 'jr' and '$ra' not in t for _v, _w, t, _a, _n in rows)
@@ -608,6 +672,12 @@ def probe(name):
         if named is None:
             if indirect:
                 continue                      # a switch table: anchored on the original at check time
+            if any(lo <= address < hi for lo, hi in data_ranges):
+                continue                      # initialised data: proven by content at check time
+            if TARGET is not None and txt.split()[0] in ('jal', 'j') and not in_loaded(segments, address):
+                continue                      # a call into another image (an overlay): the C names it by a
+                                              # foreign GLOBAL or an auto name (func_00A9CC70), which the
+                                              # target verifier resolves to the address it spells
             reasons.append(f'{address:#x} (at {row_va:#x}): no symbol covers it')
             continue
         base = named.split('+')[0]
@@ -620,6 +690,11 @@ def probe(name):
         if value != by_name[base][0]:
             reasons.append(f'{base}: {plain} resolves to {value:#x}, not {by_name[base][0]:#x}')
     return sorted(set(reasons))
+
+
+def entry_va(image):
+    """The entry point's VA: the executable segment is the one holding it."""
+    return struct.unpack_from('<I', image, 0x18)[0]
 
 
 def cmd_init(args):
@@ -641,8 +716,14 @@ def cmd_init(args):
                                    'verifier fix lifts this, not more C'), indent=1))
         return 3
     (sandbox / 'upstream').mkdir(parents=True)
-    for part in ('src', 'include', 'config'):
-        shutil.copytree(UPSTREAM / part, sandbox / 'upstream' / part, symlinks=True)
+    target_manifest = None
+    if TARGET is not None:                     # the target's sources, and a manifest pointing back at the originals
+        parts = sorted({Path(rel).parts[0] for rel in [path] + [str(Path(i).relative_to(TARGET.root))
+                                                              for i in TARGET.include if TARGET.root in Path(i).parents]})
+        target_manifest = str(TARGET.materialize(sandbox / 'upstream', sources=parts))
+    else:
+        for part in ('src', 'include', 'config'):
+            shutil.copytree(UPSTREAM / part, sandbox / 'upstream' / part, symlinks=True)
     for rel in (path, header_of(path)):        # untouched copies: the base every patch diffs against
         if (sandbox / 'upstream' / rel).is_file():
             (sandbox / 'base' / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -651,7 +732,7 @@ def cmd_init(args):
                   baseline_matches=None, upstream=str(UPSTREAM), created=time.strftime('%Y-%m-%dT%H:%M:%S'),
                   compiler=compiler, toolchains=str(toolchains_dir()) if compiler == 'contract' else None,
                   author=args.author, kit_commit=git_short(KIT), upstream_commit=git_short(UPSTREAM),
-                  base_sha256=sha256_file(sandbox / 'upstream' / path), verifier=verifier_version(),
+                  base_sha256=sha256_file(sandbox / 'upstream' / path), verifier=verifier_version(), target=target_manifest,
                   no_progress_stop=args.no_progress_stop or no_progress_default())
     (sandbox / 'budget.json').write_text(json.dumps(budget, indent=1))
     result = judge(sandbox, budget, compiler)
@@ -660,6 +741,7 @@ def cmd_init(args):
                               detail=result['detail'][:3], sandbox=str(sandbox)), indent=1))
         return 3
     budget['baseline_matches'] = result['tu_matches']
+    budget['baseline_function_matched'] = result['verdict'] == 'MATCH'
     card = None
     try:
         card = card_text(card_data(args.name, tu, path, sandbox / 'upstream' / path))
@@ -684,7 +766,8 @@ def judge(sandbox, budget, compiler=None):
     image_path = binary()
     work, report = sandbox / 'work', sandbox / 'last.json'
     report.unlink(missing_ok=True)                # the verifier wipes work/obj per run: whatever exists after is this run's
-    argv = [sys.executable, str(KIT / 'tools' / 'verify_decomp.py'), '--upstream', str(sandbox / 'upstream'),
+    tree = ['--target', budget['target']] if budget.get('target') else ['--upstream', str(sandbox / 'upstream')]
+    argv = [sys.executable, str(KIT / 'tools' / 'verify_decomp.py')] + tree + [
             '--unit', UNIT, '--tu', budget['tu'], '--symbols', str(SYMBOLS), '--binary', str(image_path),
             '--rootfs', str(ROOTFS), '--work', str(work), '--out', str(report), '-v', '--compiler', compiler]
     if compiler == 'contract':
@@ -722,7 +805,11 @@ def judge(sandbox, budget, compiler=None):
     if warnings:
         out['detail'].append('ASWARN (assembler warning, informational under stock): ' + warnings[0])
     image = image_path.read_bytes()
-    o = vd.Object(obj, vd.Symbols(SYMBOLS, binary=BINARY), image=image)
+    if budget.get('target'):
+        o = vd.target_object(obj, (sandbox / 'upstream' / budget['path']).read_text(errors='replace'),
+                             vd.Symbols(SYMBOLS, binary=BINARY), image, vd.Target(budget['target']).gp)
+    else:
+        o = vd.Object(obj, vd.Symbols(SYMBOLS, binary=BINARY), image=image)
     target = next((f for f in o.funcs if f['name'] == budget['function']), None)
     if target is None:
         out['detail'] = [f"{budget['function']} was not emitted (still INCLUDE_ASM, renamed, or an unused static)"]
@@ -830,7 +917,8 @@ def regression_of(result, budget, verdict):
     expected = budget.get('baseline_matches')
     if expected is None or result['tu_matches'] is None:
         return False
-    return result['tu_matches'] < expected + (1 if verdict in ('MATCH', 'CHEAT') else 0)
+    already = bool(budget.get('baseline_function_matched'))     # the function matched at init (a port, a re-check)
+    return result['tu_matches'] < expected + (1 if verdict in ('MATCH', 'CHEAT') and not already else 0)
 
 
 def unverifiable_count(budget, verifier_id):
@@ -1275,6 +1363,25 @@ def self_test():
         checks['hi-dropped-on-write'] = checks['hi-kept-for-other-dest'] = checks['hi-consumed'] = checks['gp-step'] = 'skipped: no rabbitizer'
     checks['offset-va'] = (offset_va([(0x200000, 0x1000, 0x138570, 0x138570)], 0x198a0) == 0x2188a0
                            and offset_va([(0x200000, 0x1000, 0x10, 0x10)], 0x2000) is None)
+    # target mode: a decomp-target/1 manifest names the TUs; locate answers with a manifest-relative path,
+    # and the regression rule allows a function that already matched at init
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / 'src' / 'main').mkdir(parents=True)
+        (root / 'src' / 'main' / 'a.c').write_text('int foo(void)\n{\n    return 1;\n}\n')
+        for rel in ('cc/bin/cc1', 'as/bin/ee-as'):
+            (root / 'tc' / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / 'tc' / rel).write_text('x')
+        (root / 't.json').write_text(json.dumps(dict(
+            schema='decomp-target/1', game_dir='ELF', symbols='s.csv', units={UNIT: dict(binary='G.ELF')},
+            toolchains='tc', default_contract='c', contracts=dict(c={'cc1': 'cc/bin/cc1', 'as': 'as/bin/ee-as'}),
+            tus=[dict(id=f'{UNIT}/a', unit=UNIT, path='src/main/a.c')])))
+        tgt = verifier().Target(root / 't.json')
+        checks['target-locate'] = locate('foo', target=tgt) == (f'{UNIT}/a', 'src/main/a.c')
+        checks['target-contract'] = target_contracts_ok(tgt, root / 'tc') and not target_contracts_ok(tgt, root)
+    checks['regression-already'] = (not regression_of(dict(tu_matches=4), dict(baseline_matches=4, baseline_function_matched=True), 'MATCH')
+                                    and regression_of(dict(tu_matches=4), dict(baseline_matches=4), 'MATCH'))
     ok = all(checks.values())
     print(json.dumps(dict(self_test='ok' if ok else 'fail', checks=checks)))
     return 0 if ok else 1

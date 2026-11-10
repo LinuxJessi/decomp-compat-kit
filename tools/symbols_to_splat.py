@@ -15,6 +15,10 @@ Usage:
   ./symbols_to_splat.py --binary SLUS_204.69 -o main.txt
   ./symbols_to_splat.py --all --outdir config/symbols/
   ./symbols_to_splat.py --binary OV11.OVL --locals -o ov11.txt
+  ./symbols_to_splat.py --target decomp-target.json --all --outdir symbols/splat
+
+--target takes the binaries, their unit names and the symbol table from a decomp-target/1
+manifest (docs/TOOLS.md "Targets") instead of Xenosaga I's.
 
 By default only GLOBAL symbols are emitted, since a file-local static's name is
 only meaningful inside its own translation unit and GCC 2.x mangles it anyway
@@ -133,7 +137,16 @@ def main() -> int:
     ap.add_argument("-o", "--out", help="output file, or - for stdout")
     ap.add_argument("--locals", action="store_true",
                     help="also emit LOCAL symbols (names keep GCC's .N suffix)")
+    ap.add_argument("--target", type=Path, help="a decomp-target/1 manifest: its units and symbol table")
     args = ap.parse_args()
+    if args.target:
+        import json
+        t = json.loads(args.target.read_text())
+        UNIT_FOR.clear()
+        UNIT_FOR.update({u["binary"]: name for name, u in (t.get("units") or {}).items()})
+        if not any(x == "--csv" or x.startswith("--csv=") for x in sys.argv[1:]) and t.get("symbols"):
+            sym = Path(os.path.expandvars(t["symbols"])).expanduser()
+            args.csv = sym if sym.is_absolute() else args.target.resolve().parent / sym
 
     if not args.csv.exists():
         print(f"no symbol table at {args.csv}", file=sys.stderr)

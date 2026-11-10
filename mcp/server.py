@@ -11,6 +11,10 @@ analyses, verdicts and diffs.
 Configuration is environment only (the 2026-07-28 protocol deprecates roots; paths
 never come from the model):
 
+  DECOMP_TARGET       a decomp-target/1 manifest (docs/TOOLS.md "Targets"): a tree without the
+                      xsg-i-decomp layout; supplies the upstream root, originals, binary,
+                      symbols and toolchains, each still overridable by its own variable
+  DECOMP_SYMBOLS      the symbol table CSV (default: the target's, else the kit's Xenosaga I table)
   DECOMP_UPSTREAM     the decomp checkout (xsg-i-decomp layout)
   DECOMP_GAME_DIR     folder holding the original executables
   DECOMP_BINARY       the original's file name (default SLUS_204.69)
@@ -73,7 +77,41 @@ GAME = Path(os.environ.get("DECOMP_GAME_DIR", ".")).expanduser()
 BINARY = os.environ.get("DECOMP_BINARY", "SLUS_204.69")
 UNIT = os.environ.get("DECOMP_UNIT", "main")
 ROOTFS = Path(os.environ.get("EE_ROOTFS", Path.home() / "ee-rootfs")).expanduser()
-SYMBOLS = KIT / "symbols" / "symbols.csv"
+SYMBOLS = Path(os.environ["DECOMP_SYMBOLS"]).expanduser() if os.environ.get("DECOMP_SYMBOLS") else KIT / "symbols" / "symbols.csv"
+
+
+def _load_target():
+    """The decomp-target/1 manifest named by DECOMP_TARGET (verify_decomp.Target), or None."""
+    if not os.environ.get("DECOMP_TARGET"):
+        return None
+    spec = importlib.util.spec_from_file_location("verify_decomp", TOOLS / "verify_decomp.py")
+    vd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vd)
+    return vd.Target(os.environ["DECOMP_TARGET"])
+
+
+TARGET = _load_target()
+if TARGET is not None:
+    UPSTREAM = UPSTREAM or TARGET.root
+    if not os.environ.get("DECOMP_GAME_DIR"):
+        GAME = TARGET.game_dir
+    if not os.environ.get("DECOMP_BINARY") and UNIT in TARGET.units:
+        BINARY = TARGET.units[UNIT]["binary"]
+    if not os.environ.get("DECOMP_SYMBOLS") and TARGET.symbols:
+        SYMBOLS = TARGET.symbols
+
+
+def unit_binary(unit: str) -> Path:
+    """The original a unit is verified against: DECOMP_BINARY names the configured unit's; any
+    other unit of a target takes its own (an overlay TU is never compared with the resident image)."""
+    if TARGET is not None and unit in TARGET.units and (not os.environ.get("DECOMP_BINARY") or unit != UNIT):
+        return (GAME if os.environ.get("DECOMP_GAME_DIR") else TARGET.game_dir) / TARGET.units[unit]["binary"]
+    return GAME / BINARY
+
+
+def tree_args() -> list[str]:
+    """How verify_decomp.py is pointed at the configured tree: --target or --upstream."""
+    return ["--target", str(TARGET.path)] if TARGET is not None else ["--upstream", str(UPSTREAM)]
 DOCKER_IMAGE = os.environ.get("DECOMP_IMAGE", "debian:bookworm-slim")   # verify_decomp.py --image: passed to every verify run and to the probe
 TEXT_LIMIT = 12000            # characters of tool stdout returned before truncation
 DOCS = {"playbook": "MATCHING-PLAYBOOK.md", "toolchain-differences": "TOOLCHAIN-DIFFERENCES.md",
@@ -210,7 +248,8 @@ def match_kit_module():
 
 def toolchains_dir() -> Path | None:
     """DECOMP_TOOLCHAINS, else <upstream>/.work/toolchains: the same rule as verify_decomp.py."""
-    tc = os.environ.get("DECOMP_TOOLCHAINS") or (str(UPSTREAM / ".work" / "toolchains") if UPSTREAM else None)
+    tc = os.environ.get("DECOMP_TOOLCHAINS") or (str(TARGET.toolchains) if TARGET is not None and TARGET.toolchains
+                                                 else str(UPSTREAM / ".work" / "toolchains") if UPSTREAM else None)
     return Path(tc).expanduser() if tc else None
 
 
@@ -285,29 +324,35 @@ def contract_blocker() -> str | None:
              "is in place. Call first when any other tool fails with a tooling error.")
 def doctor() -> dict[str, Any]:
     checks = {}
+    if TARGET is not None:
+        tus = sum(len(TARGET.tus(u)) for u in TARGET.units)
+        checks["target"] = dict(path=str(TARGET.path), name=TARGET.name, units=sorted(TARGET.units), tus=tus,
+                                contracts=sorted(TARGET.contracts), ok=tus > 0)
     checks["upstream"] = dict(path=str(UPSTREAM), ok=bool(UPSTREAM and (UPSTREAM / "config" / "tu-build.json").is_file()
-                                                           or (UPSTREAM and (UPSTREAM / "config" / "objects").is_dir())))
+                                                           or (UPSTREAM and (UPSTREAM / "config" / "objects").is_dir())
+                                                           or TARGET is not None))
     checks["game_dir"] = dict(path=str(GAME), binary=BINARY, ok=(GAME / BINARY).is_file())
     checks["unit"] = UNIT
     checks["symbols"] = dict(path=str(SYMBOLS), ok=SYMBOLS.is_file())
     checks["rootfs"] = dict(path=str(ROOTFS), ok=(ROOTFS / "lib" / "ld-linux.so.2").is_file()
                             and (ROOTFS / "opt" / "ee" / "bin" / "ee-as").is_file())
     mdir = Path(os.environ["DECOMP_MANIFEST_DIR"]).expanduser() if os.environ.get("DECOMP_MANIFEST_DIR") else UPSTREAM
-    manifest = mdir / "config" / "tu-build.json" if mdir else None
+    manifest = (mdir / "config" / "tu-build.json" if mdir else None) if TARGET is None else TARGET.path
     public = UPSTREAM / "config" / "objects" / "overlays.compile.json" if UPSTREAM else None
     has_private, has_public = bool(manifest and manifest.is_file()), bool(public and public.is_file())
     checks["manifest"] = dict(private=str(manifest), private_ok=has_private, public=str(public), public_ok=has_public,
-                              ok=has_private or has_public,
-                              note=("TU discovery uses the private manifest (config/tu-build.json + config/tu/<unit>/)" if has_private
+                              ok=has_private or has_public or TARGET is not None,
+                              note=("TU discovery uses the target manifest (DECOMP_TARGET)" if TARGET is not None
+                                    else "TU discovery uses the private manifest (config/tu-build.json + config/tu/<unit>/)" if has_private
                                     else "TU discovery uses the upstream's public config/objects/overlays.compile.json" if has_public
                                     else "no TU manifest: neither config/tu-build.json (DECOMP_MANIFEST_DIR) nor config/objects/overlays.compile.json"))
-    if has_private and not os.environ.get("DECOMP_MANIFEST_DIR") and UPSTREAM and (UPSTREAM / ".git").exists():
+    if has_private and TARGET is None and not os.environ.get("DECOMP_MANIFEST_DIR") and UPSTREAM and (UPSTREAM / ".git").exists():
         checks["manifest"]["warning"] = ("config/tu-build.json sits inside a git checkout: the upstream's own configure "
                                          "reads it as the provider contract and refuses on a cc1 mismatch (data_carve); "
                                          "keep the manifest outside and point DECOMP_MANIFEST_DIR at it")
     tc = toolchains_dir()
     checks["toolchains"] = dict(path=str(tc) if tc else None, ok=bool(tc and tc.is_dir()))
-    if tc and tc.is_dir() and UPSTREAM:
+    if tc and tc.is_dir() and UPSTREAM and TARGET is None:
         try:
             spec = importlib.util.spec_from_file_location("verify_decomp", TOOLS / "verify_decomp.py")
             vd = importlib.util.module_from_spec(spec); spec.loader.exec_module(vd)
@@ -323,6 +368,23 @@ def doctor() -> dict[str, Any]:
                                               "by a few words on functions the newer patches change")
         except Exception as e:
             checks["contract"] = dict(error=str(e)[-200:])
+    if tc and tc.is_dir() and TARGET is not None:
+        # a target names its tools per contract: each pair must be there, and when the tree pins
+        # a cc1 (config/toolchain-identity.json tools.<name>.files.cc1) the one found must be that one
+        try:
+            pins = {str(t.get("dir")) + "/cc1": (t.get("files") or {}).get("cc1") for t in
+                    (json.loads((UPSTREAM / "config" / "toolchain-identity.json").read_text()).get("tools") or {}).values()
+                    if isinstance(t, dict) and t.get("dir")}
+        except (OSError, ValueError, AttributeError):
+            pins = {}
+        rows = {}
+        for name, c in TARGET.contracts.items():
+            cc1, ee_as = tc / c["cc1"], tc / c["as"]
+            sha = hashlib.sha256(cc1.read_bytes()).hexdigest() if cc1.is_file() else None
+            pin = pins.get(c["cc1"])
+            rows[name] = dict(cc1=c["cc1"], ee_as=c["as"], as_flags=c.get("as_flags"), present=bool(sha) and ee_as.is_file(),
+                              upstream_pin=pin, current=(sha == pin) if (pin and sha) else None)
+        checks["contract"] = dict(ok=all(r["present"] and r["current"] is not False for r in rows.values()), contracts=rows)
     if checks["game_dir"]["ok"]:
         fam = binary_family()
         checks["binary_compiler"] = dict(ok=True, **fam)
@@ -594,7 +656,8 @@ def verify_unit_start(compiler: str = "stock", unit: str | None = None, baseline
     u = unit or UNIT
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     report = JOBS_DIR / f"verify-{u}-{compiler}-{time.strftime('%Y%m%d-%H%M%S')}.json"
-    args = ["--upstream", str(UPSTREAM), "--unit", u, "--symbols", str(SYMBOLS), "--binary", str(GAME / BINARY),
+    binary = unit_binary(u)
+    args = tree_args() + ["--unit", u, "--symbols", str(SYMBOLS), "--binary", str(binary),
             "--compiler", compiler, "--rootfs", str(ROOTFS), "--work", str(Path.home() / ".cache" / "decomp-verify-mcp"),
             "--docker-timeout", "1800", "--image", DOCKER_IMAGE, "--out", str(report)]
     if baseline:
@@ -619,8 +682,9 @@ def verify_tu(tu: str, compiler: str = "stock") -> dict[str, Any]:
     unit = tu.split("/")[0] if "/" in tu else UNIT
     report = JOBS_DIR / f"verify-{tu.replace('/', '__')}-{compiler}.json"
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
-    r = run("verify_decomp.py", ["--upstream", str(UPSTREAM), "--unit", unit, "--tu", tu, "--symbols", str(SYMBOLS),
-                                 "--binary", str(GAME / BINARY), "--compiler", compiler, "--rootfs", str(ROOTFS),
+    binary = unit_binary(unit)
+    r = run("verify_decomp.py", tree_args() + ["--unit", unit, "--tu", tu, "--symbols", str(SYMBOLS),
+                                 "--binary", str(binary), "--compiler", compiler, "--rootfs", str(ROOTFS),
                                  "--work", str(Path.home() / ".cache" / "decomp-verify-mcp"), "--image", DOCKER_IMAGE,
                                  "--out", str(report), "-v"],
             timeout=900)
