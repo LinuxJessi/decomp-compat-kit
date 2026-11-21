@@ -10,7 +10,7 @@ summary is `../CORPUS.md`.
 |---|---|---|---|---|
 | [Xenosaga Episode I](xenosaga-1.md) | SLUS_204.69 | 2002 | SCE ee-gcc 2.96 | **reference target**: proven by byte-identical compiles; symbols shipped; the verify and match lanes were built on it |
 | [Xenosaga Episode II](xenosaga-2.md) | SLUS_208.92 | 2004 | SCE ee-gcc 2.96 | **proven**: 141 functions Tier A with relocations applied (136 compiled from Xenosaga I's C); the target-manifest, ledger and port lanes were built on it |
-| [Xenosaga Episode III](xenosaga-3.md) | SLUS_213.89 | 2006 | SCE ee-gcc 2.96 | proven on one overlay; 428 names transferred from Xenosaga I |
+| [Xenosaga Episode III](xenosaga-3.md) | SLUS_213.89 | 2006 | SCE ee-gcc 2.96 | **proven** on all four units (the upstream decomp verifies 1,129 of 1,135 recovered functions; seven more matched in OV04); three builds compared; `-G` and `-fno-strict-aliasing` measured per file |
 | [Final Fantasy X](final-fantasy-x.md) | SLUS_203.12 | 2001 | SCE ee-gcc 2.9-ee-991111 family | fingerprint lead; Sony's own 2000 toolchain is now in hand and probed |
 | [Metal Gear Solid 3](metal-gear-solid-3.md) | SLUS_209.15 | 2004 | SCE ee-gcc 3.x | fingerprint lead; boot ELF is a zlib stub, unwrapped byte-exact |
 | [Silent Hill 2](silent-hill-2.md) | SLUS_202.28 | 2001 | Metrowerks CodeWarrior for PS2 | compiler identified; 54 overlay records read; CodeWarrior compiler now runs, no judged lane yet |

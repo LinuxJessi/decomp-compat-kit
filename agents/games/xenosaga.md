@@ -18,11 +18,11 @@ Episode I, `SLUS_204.69`, unstripped, with ELF overlays (`OV01.OVL`, `OV10.OVL`,
 
 ## all xenosaga-2
 
-Episode II, `SLUS_208.92` (disc 2's `SLUS_211.33` is byte-identical), `OV01.OVL`, `OV02.OVL`, all stripped. No symbol table: the `func_`, `enepc_`, `objx_`, `runtime_` and `D_` names in the upstream are the maintainer's estimates; keep them and never rename one. MCP: `ps2decomp-xs2`, served through a target manifest and symbol CSV that `KIT/tools/upstream_target.py` writes from the checkout (`DECOMP_TARGET`, `DECOMP_SYMBOLS`); both are local files, never committed, copied or quoted as a name source. Contract: Episode I's compiler (patched ee-gcc 2.96, cc1 with the fsv patches up to fsv12, the swap-mask assembler with `-g`). The kit's default pair lacks `-g` and leaves the inline-asm `MMath*` functions one word short, so confirm that line 1 of a check names the `-g` contract (`ee-tu-c296-G8-g` on the kit page) before trusting a REORDER or HAZARD-NOP. Some TUs are `-O0`. Cards show no matched siblings here: grep the tree's `src/` and `include/` for a callee or `D_` symbol and reuse the declaration other files use. Upstream: OpokXeno/xsg-ii-decomp; work goes through the user's fork and pull requests, never a push to the maintainer's repository, and the maintainer reads the whole merged file, not the diff. Page: `KIT/docs/games/xenosaga-2.md`.
+Episode II, `SLUS_208.92` (disc 2's `SLUS_211.33` is byte-identical), `OV01.OVL`, `OV02.OVL`, all stripped. No symbol table: the `func_`, `enepc_`, `objx_`, `runtime_` and `D_` names in the upstream are the maintainer's estimates; keep them while matching, but a function you restore must leave with a real name (the maintainer rejected restored functions left as `func_*`, 2026-11-12): report `OLD=NEW` with evidence; renames go through the symbol, object and function-name configs together. An ov01/ov02 address the upstream's config/symbols/*.txt already names is called by that name, and a field whose role a comment states gets that name. Before reporting run the MCP `lint_tu` and clear its `review` section (or comment why the plain form was not possible). MCP: `ps2decomp-xs2`, served through a target manifest and symbol CSV that `KIT/tools/upstream_target.py` writes from the checkout (`DECOMP_TARGET`, `DECOMP_SYMBOLS`); both are local files, never committed, copied or quoted as a name source. Contract: Episode I's compiler (patched ee-gcc 2.96, cc1 with the fsv patches up to fsv12, the swap-mask assembler with `-g`). The kit's default pair lacks `-g` and leaves the inline-asm `MMath*` functions one word short, so confirm that line 1 of a check names the `-g` contract (`ee-tu-c296-G8-g` on the kit page) before trusting a REORDER or HAZARD-NOP. Some TUs are `-O0`. Cards show no matched siblings here: grep the tree's `src/` and `include/` for a callee or `D_` symbol and reuse the declaration other files use. Upstream: OpokXeno/xsg-ii-decomp; work goes through the user's fork and pull requests, never a push to the maintainer's repository, and the maintainer reads the whole merged file, not the diff. Page: `KIT/docs/games/xenosaga-2.md`.
 
 ## all xenosaga-3
 
-Episode III, `SLUS_213.89` and overlays at `0xa7f000`, stripped. The kit docs name no public upstream decomp, so the gate, branch and contribution rules are those of the Episode III project the user names (ask when the launch prompt does not say). The kit's part: names transferred from Episode I (`transfer_symbols.py --donor SLUS_204.69 --donor-symbols KIT/symbols/symbols.csv --acceptor SLUS_213.89 --mask loose`), triage, and verify/match through that project's own target manifest. OV04 was built `-O2 -G0 -fno-strict-aliasing`. Page: `KIT/docs/games/xenosaga-3.md`.
+Episode III, `SLUS_213.89` (disc 2's `SLUS_214.17` is byte-identical), `OV01.OVL` (title), `OV02.OVL` (battle), `OV04.OVL` (minigame), all stripped; the overlays share `0xa80000` (file offset 0 of OV02/OV04 maps to `0xa7f000`) and main embeds `ov01`. No symbol table and no unstripped IOP module: the `func_` and `D_` names in the upstream are the maintainer's estimates, and Episode II's naming rule applies (a restored function leaves with a real name, reported `OLD=NEW` with evidence; an address the upstream's config/symbols/*.txt already names is called by that name). MCP: `ps2decomp-xs3`, served through a target manifest and symbol CSV that `KIT/tools/upstream_target.py` writes from the checkout (`DECOMP_TARGET`, `DECOMP_SYMBOLS`); both are local files, never committed, copied or quoted as a name source. Contract: Episode I's compiler (patched ee-gcc 2.96, cc1 with the fsv patches up to fsv16, the swap-mask assembler with `-g`). Two flags are per TU and a wrong one hides until a function discriminates: `-G` (overlays are all `-G0`, main mixes `-G8` and `-G0`; a function a few bytes long or short around a small global means the TU's `-G` is wrong, as `main/tu334` was) and `-fno-strict-aliasing` (off for main's recovered TUs, on for OV04's HaKox TU: one load scheduled a few instructions early, same instruction multiset, is its signature). Report either as a finding for the maintainer with the function and the first differing instruction; do not bend the C around it. Siblings: the May 2006 prototype and Japan retail are the same toolchain and 99 % the same code, good for telling an address from a constant. Upstream: OpokXeno/xsg-iii-decomp; work goes through the user's fork and pull requests, never a push to the maintainer's repository, and the maintainer reads the whole merged file, not the diff. Page: `KIT/docs/games/xenosaga-3.md`.
 
 ## orchestrator
 
@@ -40,7 +40,7 @@ The gate: `./configure.py`, then `ninja gate`, covering `SLUS_208.92`, `OV01.OVL
 
 ## orchestrator xenosaga-3
 
-Naming first (transfer from Episode I, triage), then matching through the Episode III project's target manifest and its own gate; take the gate command and contribution rules from that project's README, never from the Episode I or II notes.
+The upstream started as a port of Episode II's recovered functions, so the cheap work is what Episode II shares (the Ti\* modules, xenoActor, xgl, `cfe`) and what Episode I names (`transfer_symbols.py --mask loose`); OV04 is small and self-contained. Take the gate command and contribution rules from the Episode III upstream's README, never from the Episode I or II notes.
 
 ## matcher
 
@@ -76,7 +76,7 @@ Episode II: in the integration tree `./configure.py`, then `ninja gate`; `SLUS_2
 
 ## integrator xenosaga-3
 
-Episode III: GATE is the Episode III project's own whole-file command named in your prompt; if the prompt names none, stop and ask.
+Episode III: GATE is the upstream's own whole-file command (`ninja gate` in OpokXeno/xsg-iii-decomp's README) unless your prompt names another.
 
 ## verifier
 
@@ -96,7 +96,7 @@ The estimated names stay: an Episode I or III name for a twin goes into HINTS as
 
 ## enricher xenosaga-3
 
-Episode III twins: transfer from Episode I with `--mask loose` (428 of 428 found); names from a separate Episode III project are leads from another binary.
+Episode III twins: transfer from Episode I with `--mask loose` (428 of 428 found); Episode II's upstream names for shared code (1,603 functions of 64 bytes or more are in both) are the closer relative; the prototype's and Japan's copies of a function (`transfer_symbols.py --sibling`) show which of its words are addresses.
 
 ## iop-matcher
 

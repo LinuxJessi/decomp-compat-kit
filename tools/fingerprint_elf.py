@@ -12,11 +12,12 @@ heuristic corrections came out of that work and fix the order below:
      linker's overlay record, the format CodeWarrior for PlayStation documents
      and CodeWarrior for PS2 kept as version 3; a zlib stub ELF hides the real
      image (see unwrap_image.py); an IOP module (ELF type 0xff80, `.iopmod`)
-     is R3000 code and none of the EE heuristics apply. The entry point is a
-     tell too: Metrowerks' PS2 startup zeroes every register with `padduw`
-     before the SetupThread/SetupHeap syscalls (Yakuza), the shape CodeWarrior
-     for PlayStation's `_psstart.c` had; a game can also link Sony's crt0
-     (Silent Hill 2 does), so the SCE shape never argues against CodeWarrior.
+     is R3000 code and none of the EE heuristics apply. The entry point is
+     reported but names no vendor: a run of `padduw rd,$zero,$zero` before the
+     SetupThread/SetupHeap syscalls was first met on Yakuza (CodeWarrior) and
+     read as a Metrowerks habit, then found word for word at the entry of
+     Xenosaga III (SCE ee-gcc 2.96, no Metrowerks code). Both link SDK 3.0.0:
+     it is that SDK's crt0. The older crt0 (bss clear first) says as little.
   3. the prologue census: `addiu $sp,$sp,-N` followed by callee saves. SCE
      ee-gcc saves with `sd` at an 8-byte stride; SN ProDG *and* Metrowerks
      CodeWarrior both save with `sq` at a 16-byte stride, so `sq` alone never
@@ -123,9 +124,11 @@ LI_V1_SETUPTHREAD, LI_V1_SETUPHEAP = 0x2403003C, 0x2403003D
 
 
 def startup_shape(img) -> dict | None:
-    """Metrowerks' PS2 `_psstart` zeroes every GPR with padduw (then hi/lo, sa, every FPR) before
-    the SetupThread (0x3c) and SetupHeap (0x3d) syscalls; Sony's crt0 starts at the bss clear and
-    the same two syscalls. Measured on Yakuza's loader and Silent Hill 2 (docs/CODEWARRIOR.md)."""
+    """The shape of the entry point: a tell about the SDK's crt0, never about the compiler.
+    `sce-crt0`: starts at the bss clear, then SetupThread (0x3c) and SetupHeap (0x3d): Xenosaga I
+    and II (ee-gcc), Silent Hill 2 (CodeWarrior). `sce-crt0-regclear`: zeroes the GPRs with padduw
+    (29 of them, $k0/$k1 skipped), then hi/lo, sa and every FPR, before the same two syscalls:
+    Xenosaga III (ee-gcc) and Yakuza's loader (CodeWarrior), both SDK 3.0.0 (docs/CODEWARRIOR.md)."""
     if not img.elf:
         return None
     entry = img.elf["entry"]
@@ -145,10 +148,10 @@ def startup_shape(img) -> dict | None:
             break
     sce = any(words[i] in (LI_V1_SETUPTHREAD, LI_V1_SETUPHEAP) and words[i + 1] == SYSCALL for i in range(n - 1))
     if zeroed >= 16:
-        return dict(kind="metrowerks-psstart", registers_zeroed=zeroed, sce_syscalls=sce,
-                    note=f"entry zeroes {zeroed} registers with padduw before SetupThread/SetupHeap: the startup of "
-                         "Yakuza (a CodeWarrior title), the habit of CodeWarrior for PlayStation's _psstart.c; a tell "
-                         "about the title's startup file, since CodeWarrior for PS2 R3.0x stationery links Sony's crt0.s")
+        return dict(kind="sce-crt0-regclear", registers_zeroed=zeroed, sce_syscalls=sce,
+                    note=f"entry zeroes {zeroed} registers with padduw before SetupThread/SetupHeap: the crt0 of "
+                         "SDK 3.0.0, the same words in Xenosaga III (SCE ee-gcc) and Yakuza (CodeWarrior); "
+                         "a startup tell, not a compiler tell")
     if sce:
         return dict(kind="sce-crt0", registers_zeroed=0, sce_syscalls=True,
                     note="entry is Sony's crt0 shape (bss clear, SetupThread 0x3c, SetupHeap 0x3d): a startup tell, "
@@ -392,8 +395,6 @@ def verdict(img: Image, s: dict, c: dict, startup: dict | None = None) -> dict:
             footnotes.append(lineage)
         if dominant == "sq":
             reasons.append(f"corroborated by the census: sq/16-byte saves dominate ({style.get('sq')} of {total})")
-        if startup and startup["kind"] == "metrowerks-psstart":
-            reasons.append(startup["note"])
         if c["div_s"] >= 20 and c["div_s_padded"] * 2 < c["div_s"]:
             reasons.append(f"div.s unpadded in {c['div_s'] - c['div_s_padded']} of {c['div_s']} (SCE gcc writes nop;nop "
                            "before every div.s since 2000): the game code is not SCE gcc; the padded minority is the SDK")
@@ -409,9 +410,6 @@ def verdict(img: Image, s: dict, c: dict, startup: dict | None = None) -> dict:
         if img.kind.startswith("mwo"):
             name, conf = "Metrowerks CodeWarrior for PS2 (MWCC)", "high"
             reasons.append(f"{img.kind.upper().replace('MWO', 'MWo')} container: the Metrowerks linker's overlay record")
-        elif startup and startup["kind"] == "metrowerks-psstart":
-            name, conf = "Metrowerks CodeWarrior for PS2 (MWCC)", "medium"
-            reasons.append(startup["note"])
     elif dominant == "sd":
         gcc3 = s["mangling"]["itanium"] > s["mangling"]["old_gnu"] and s["mangling"]["itanium"] > 2
         # 2.96 forms a float constant as lui+mtc1; 3.x loads it from .rodata. lwc1 also reads
@@ -621,13 +619,14 @@ def self_test() -> int:
     checks["sq-ambiguous"] = "ProDG or Metrowerks" in r["verdict"]["compiler"]
     checks["lineage"] = any("Release 4" in f for f in fingerprint("mw", build_elf(SQ_PROLOGUE, comment=b"MW MIPS C Compiler (2.44.14)\0"))["verdict"]["footnotes"]) \
         and any("PlayStation 2" in f for f in fingerprint("mw", mw)["verdict"]["footnotes"])
-    # the Metrowerks PS2 startup: 31 padduw rd,$zero,$zero at the entry, then the SetupThread/SetupHeap
-    # syscalls; no .comment, so only the startup names the vendor
+    # the register-clearing crt0 (SDK 3.0.0): a run of padduw rd,$zero,$zero at the entry, then the
+    # SetupThread/SetupHeap syscalls. It is reported and names no vendor: with no .comment the
+    # sq census stays "ProDG or Metrowerks" (Xenosaga III starts this way under ee-gcc)
     mw_start = asm(0, 0) + asm(*[PADDUW_ZERO | (rd << 11) for rd in range(1, 32)]) \
         + asm(0x3C020015, 0x24426300, LI_V1_SETUPTHREAD, SYSCALL, LI_V1_SETUPHEAP, SYSCALL)
     r = fingerprint("yak", build_elf(mw_start + SQ_PROLOGUE * 3))
-    checks["mw-startup"] = r["startup"]["kind"] == "metrowerks-psstart" and r["startup"]["registers_zeroed"] == 31 \
-        and r["verdict"]["compiler"].startswith("Metrowerks") and r["verdict"]["confidence"] == "medium"
+    checks["regclear-startup"] = r["startup"]["kind"] == "sce-crt0-regclear" and r["startup"]["registers_zeroed"] == 31 \
+        and "ProDG or Metrowerks" in r["verdict"]["compiler"]
     sce_start = asm(0, 0, 0x3C02003E, 0x24426880, 0x7C400000, LI_V1_SETUPTHREAD, SYSCALL, LI_V1_SETUPHEAP, SYSCALL)
     r = fingerprint("sh2", build_elf(sce_start + SQ_PROLOGUE * 3, comment=b"MW MIPS C Compiler (2.4.1.01)\0"))
     checks["sce-startup"] = r["startup"]["kind"] == "sce-crt0" and r["verdict"]["compiler"].startswith("Metrowerks") \

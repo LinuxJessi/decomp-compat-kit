@@ -33,11 +33,13 @@ Two corrections this corpus forced on the earlier heuristics:
   same way. Silent Hill 2 would have been filed as a Western ProDG title by the
   census alone; its `.comment` says CodeWarrior. The census corroborates a
   vendor string, it never replaces one.
-- **The entry point names Metrowerks when the `.comment` is gone.** Yakuza's
-  loader zeroes every register with `padduw` before Sony's SetupThread /
-  SetupHeap sequence, the habit of CodeWarrior for PlayStation's `_psstart.c`;
-  Silent Hill 2 starts at the `.bss` clear, i.e. Sony's `crt0`, so the Sony
-  shape never argues against CodeWarrior. The `MWo3` record and the compiler's
+- **The entry point names no compiler.** Yakuza's loader zeroes 29 registers
+  with `padduw` before Sony's SetupThread / SetupHeap sequence, and this file
+  once read that as a Metrowerks startup. Xenosaga III, built with ee-gcc and
+  holding no Metrowerks code, starts with the same words; both link SDK 3.0.0,
+  so it is that SDK's `crt0`. Silent Hill 2 starts at the `.bss` clear, the
+  older `crt0`, under CodeWarrior. The fingerprint reports the shape
+  (`sce-crt0-regclear` / `sce-crt0`) and draws nothing from it. The `MWo3` record and the compiler's
   version lineage are read in `docs/CODEWARRIOR.md`.
 - **`nop;nop` before `div.s` separates SCE gcc from everything else.** Sony's
   2.9-ee-991111-01 patch (June 2000) added it and every later SCE ee-gcc kept
@@ -63,7 +65,7 @@ decides and the minority is reported, not explained away.
 | Xenosaga Episode I, SSD.IRX | — | 2002 | Monolith Soft | IOP module (ELF 0xff80, `.iopmod`) | IOP module, R3000: EE heuristics skipped | 442 FUNC symbols; `sw`-only prologues (MIPS-I) | no | sw 214 of 214 |
 | Xenosaga Episode II | SLUS_208.92 (= SLUS_211.33) | 2004 | Monolith Soft | plain ELF (section headers kept, symbols stripped; `ov02` embedded) + 2 ELF overlays at 0xa80000 | **SCE ee-gcc 2.96** (high; proven by 141 Tier-A functions, 136 compiled from Xenosaga I's C) | float immediates 1,761; div.s 494 of 494 `nop;nop`-padded; 4-byte `.eh_frame`; `.vutext` + `.DVP.overlay` sections; banners libcdvd 2.7.1.0, libgraph 2.7.0.0, libkernl 2.7.1.0, libmpeg 2.7.0.0, libmrpc 2.7.0.0; CRI middleware stamps Jan 23 2004; 26 `.euc.c` source names | yes | sd 3,792 of 3,829 (sd/8 3,477, sd/16 313) / sw 33, sq 4 |
 | Xenosaga Episode II, OV02.OVL | — | 2004 | Monolith Soft | ELF overlay, byte-identical to the SLUS's embedded `ov02` | verdict printed: ee-gcc 3.x (medium) — **a small-sample misread**: 14 prologues, 0 float constants; its 25 "pool" loads are `lwc1` field reads; part of the SLUS link | — | yes | sd 14 of 14 (sd/8) |
-| Xenosaga Episode III | SLUS_213.89 | 2006 | Monolith Soft | plain ELF + 3 ELF overlays at 0xa7f000 | **SCE ee-gcc 2.96** (medium here; proven elsewhere by the OV04 HaKox byte-match) | float immediates 2,603; 4-byte `.eh_frame`; `.vutext`; banners libcdvd/libgraph/libkernl/libmpeg 3.0.0.0; 12 stamps Aug 9 2005; 38 `.euc.c` source names | yes | sd 4,876 of 4,915 (sd/8 4,566, sd/16 310) / sw 36, sq 3 |
+| Xenosaga Episode III | SLUS_213.89 | 2006 | Monolith Soft | plain ELF (`ov01` embedded) + 3 ELF overlays at 0xa80000 | **SCE ee-gcc 2.96** (medium here; proven by seven OV04 functions and by the upstream decomp, 1,129 of 1,135 recovered functions verified) | float immediates 2,603; 4-byte `.eh_frame`; `.vutext`; banners libcdvd/libgraph/libkernl/libmpeg 3.0.0.0; 12 stamps Aug 9 2005; 38 `.euc.c` source names | yes | sd 4,876 of 4,915 (sd/8 4,566, sd/16 310) / sw 36, sq 3 |
 | Xenosaga Episode III, OV04.OVL | — | 2006 | Monolith Soft | ELF overlay | SCE ee-gcc 2.96 (medium; this is the overlay the byte-match proved) | float immediates 613 | yes | sd 181 of 181 (all sd/8) |
 | Final Fantasy X | SLUS_203.12 | 2001 | Square | plain ELF, `.vutext` in the ELF | **SCE ee-gcc 2.9x, 1999 build** (`2.9-991111`-style `sd` at 16-byte stride; medium, new hypothesis) | sd/16 5,339 vs sd/8 28; float immediates 1,473; banners libcdvd 2.3.4.0, libgraph 2.3.0.0, libkernl 2.3.4.0; stamps Jun 2, Oct 25, Oct 30, Nov 2 2001; 40 source names (`tklib.c`, `rcBBox.c`, …) | yes | sd 5,375 of 5,421 / sw 42, sq 4 |
 | Metal Gear Solid 3 | SLUS_209.15 | 2004 | Kojima Productions | **zlib-stub ELF** (PT_LOAD 0x800000) → 1,069,700-byte headerless image with a Konami header (word 0 = 2004-10-29 11:43:09 UTC) | **SCE ee-gcc 3.x** (low: the float idiom and unpadded `sqrt.s`, no independently identified 3.x binary to compare; earlier notes said "2.9x-consistent" from the stride alone) | sd/8 1,035, sd/16 295; float constants from `.rodata` 2,649 vs 5 immediates; banners libcdvd/libgraph/libkernl 3.0.0.0, libpad2 3.0.2.0 | yes | sd 1,330 of 1,361 / sw 26, sq 5 |

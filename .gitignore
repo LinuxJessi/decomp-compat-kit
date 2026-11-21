@@ -17,3 +17,5 @@ report.json
 *.BIN
 # Episode II name tables generated from the maintainer's tree (no licence): local only
 symbols/xs2-*
+# Episode III likewise
+symbols/xs3-*

@@ -33,10 +33,12 @@ the order that avoids the known misreads:
    overlay record; a boot ELF whose one segment starts `[u32 length][zlib
    stream]` is a decompressor stub; ELF type `0xff80` / `.iopmod` is an IOP
    module (R3000, none of the EE heuristics apply).
-3. **The entry point.** A run of `padduw rd,$zero,$zero` is the register-
-   zeroing startup seen on Yakuza, the habit of CodeWarrior for PlayStation's
-   `_psstart.c`; Sony's `crt0` shape proves nothing (Silent Hill 2 links it
-   under CodeWarrior).
+3. **The entry point** is reported and names no vendor. A run of
+   `padduw rd,$zero,$zero` before SetupThread/SetupHeap (`sce-crt0-regclear`)
+   was first met on Yakuza and read as a Metrowerks startup; Xenosaga III, an
+   ee-gcc title, starts with the same words. Both link SDK 3.0.0: it is that
+   SDK's `crt0`. The older shape (`sce-crt0`, bss clear first) says as little:
+   Silent Hill 2 links it under CodeWarrior.
 4. **The prologue census.** `addiu $sp,$sp,-N` followed by callee saves. SCE
    ee-gcc saves with `sd`, at 8 bytes (2.96, 3.x) or 16 (the 1999 `2.9-991111`
    build); CodeWarrior and ProDG save with `sq` at 16. The census alone cannot
@@ -362,6 +364,12 @@ its symbol table from a splat-based checkout that has no ELF symbols (OpokXeno/x
 flags and assembler options of `config/objects/*.compile.json`, the tool paths of
 `config/toolchain-identity.json`); `root`, `game_dir` and `toolchains` are written as
 `$DECOMP_UPSTREAM`, `$DECOMP_GAME_DIR` and `$DECOMP_TOOLCHAINS`. Rerun it after a rename.
+It reads OpokXeno/xsg-iii-decomp unchanged (four units, 499 C TUs). A name the resident
+image gives an address in the overlay bank (Xenosaga III's main calls test-window
+functions in OV02; three overlays share that bank) is written as an absolute of the
+resident image, since the address alone names no unit. So is a name a unit's linker
+script provides for an address in no image on the disc (Xenosaga II's main calls into a
+test overlay that did not ship): eight more functions judged there.
 
 In target mode only (the upstream path is byte-for-byte the old behaviour):
 
@@ -370,7 +378,11 @@ In target mode only (the upstream path is byte-for-byte the old behaviour):
   `@cflags -G0 -fno-strict-aliasing` overrides the manifest's flags, `@rodata 0xA 0xB ...`
   gives the TU's `.rodata` objects in emission order, `@data/@sdata/@bss/@sbss 0xVA` a
   section base. Ghidra-style names (`FUN_00186448`, `DAT_00645820`) and splat's
-  (`func_00A9CC70`, `D_0061B2D0`, `jtbl_0068DCB0`) resolve to the address they spell.
+  (`func_00A9CC70`, `D_0061B2D0`, `jtbl_0068DCB0`) resolve to the address they spell,
+  and a function *defined* under one is judged as the table's function at that address
+  whatever the table calls it (a Ghidra-named TU against a splat table). Annotations are
+  read from the TU and from the headers it includes (next to it or under an include
+  root): a TU-local header is where a shared struct's `@addr` belongs.
 - **Content-verified data references.** A reference into the original's initialised data
   (`.rodata` strings and floats, `.lit4`, `.data`, `.sdata`) needs no name: the address the
   original encodes at that site is accepted only when the original holds the object's bytes

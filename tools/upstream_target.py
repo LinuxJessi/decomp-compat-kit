@@ -150,10 +150,17 @@ def symbol_rows(up: Path, game_dir, units: dict, warn=print) -> list:
             o = owner(u, va)
             if o:
                 add(o, name, va, 0, "OBJECT")
+            elif u == resident and any(lo <= va < lo + n for x in units for lo, n in segs.get(x, [])):
+                # The resident image names an address in an overlay bank it calls into (Xenosaga III's
+                # main calls OV02's test-window functions; three overlays share that bank, so the
+                # address alone does not say which). It is an absolute to the resident's objects.
+                add(resident, name, va, 0, "NOTYPE")
     for ld in sorted((up / "config" / "symbols").glob("*.externals.ld")):
         for m in PROVIDE.finditer(ld.read_text()):                # the tag is a unit, or a library (libgcc)
             o = m.group(3) if m.group(3) in units else owner(resident, int(m.group(2), 16))
-            if o:
+            if not o and ld.name.split(".")[0] in units:          # an address in no image on the disc (a
+                o = ld.name.split(".")[0]                         # test overlay): an absolute of the unit
+            if o:                                                 # whose linker script provides it
                 add(o, m.group(1), int(m.group(2), 16), 0, "NOTYPE")
     if resident and game_dir and (Path(game_dir) / units[resident]).is_file():
         gp = reginfo_gp((Path(game_dir) / units[resident]).read_bytes())

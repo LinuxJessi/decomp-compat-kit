@@ -293,6 +293,52 @@ Still open:
 - The card has no matched siblings and no state: this tree has no per-TU ledger.
 - The table and the manifest are snapshots: rerun `upstream_target.py` after a pull.
 
+## Xenosaga III (2026-11-21): Opok's xsg-iii-decomp as a target
+
+OpokXeno/xsg-iii-decomp (SLUS_213.89, OV01.OVL, OV02.OVL, OV04.OVL; public since
+2026-11-20) has the layout of the Episode II tree, so it is served the same way: a
+generated manifest and symbol table, local files that are never committed.
+
+```sh
+tools/upstream_target.py --upstream UPSTREAM_DIR --game-dir GAME_DIR \
+    --symbols-out symbols/xs3-symbols.csv --target-out symbols/xs3-target.json
+```
+
+writes 11,866 rows (main 9,930 functions, OV01 21, OV02 1,364, OV04 307, the data labels,
+`_gp`) and 499 C TUs under one contract (cc1 fsv16 + the swap-mask assembler with `-g`).
+Three kit changes came out of the first run, none keyed on the game (`docs/games/xenosaga-3.md`):
+a name the main image gives an overlay-bank address is kept as an absolute of main; a
+function defined under an auto name is sized from the table's row at that address; a TU's
+annotations are also read from the headers it includes.
+
+Registration (a fourth server):
+
+```sh
+claude mcp add --scope user ps2decomp-xs3 \
+  -e "DECOMP_TARGET=KIT/symbols/xs3-target.json" \
+  -e "DECOMP_UPSTREAM=UPSTREAM_DIR" \
+  -e "DECOMP_GAME_DIR=GAME_DIR" \
+  -e "DECOMP_BINARY=SLUS_213.89" -e "DECOMP_RESIDENT=SLUS_213.89" \
+  -e "DECOMP_SYMBOLS=KIT/symbols/xs3-symbols.csv" \
+  -e "DECOMP_TOOLCHAINS=TOOLCHAINS_DIR" \
+  -e "EE_ROOTFS=$HOME/ee-rootfs" \
+  -e "DECOMP_SANDBOXES=$HOME/.cache/decomp-match-xs3" \
+  -- KIT/.venv/bin/python KIT/mcp/server.py
+```
+
+Verified at upstream `3a26737`, contract compiler, the checkout untouched:
+
+```
+main   identical: 1008/1014  (99.4%)   differing: 6   unverifiable: 0   unknown symbol: 0   build failures: 0
+ov01   identical: 7/7  (100.0%)   differing: 0   unverifiable: 0   unknown symbol: 0   build failures: 0
+ov02   identical: 91/91  (100.0%)   differing: 0   unverifiable: 0   unknown symbol: 0   build failures: 0
+ov04   identical: 23/23  (100.0%)   differing: 0   unverifiable: 0   unknown symbol: 0   build failures: 0
+```
+
+The six are `main/tu334` (`TiDynamicsColl.c`), recorded `-G0` upstream and 15 of 15 at
+`-G8`. In process: `doctor` `ok: true`, `name_lookup func_00A919C8` returns its OV04 row,
+`verify_tu ov04/tu019` judges against OV04.OVL.
+
 ## Not yet
 
 - The tasks extension once the SDK carries it (replaces the job handles).

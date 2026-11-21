@@ -73,7 +73,7 @@ was measured, which tools apply, what is open.
 |---|---|---|
 | [Xenosaga Episode I](docs/games/xenosaga-1.md) (2002) | SCE ee-gcc 2.96 | reference target, proven; symbols shipped |
 | [Xenosaga Episode II](docs/games/xenosaga-2.md) (2004) | SCE ee-gcc 2.96 | proven: 141 functions Tier A through a target manifest, 136 of them Episode I's C |
-| [Xenosaga Episode III](docs/games/xenosaga-3.md) (2006) | SCE ee-gcc 2.96 | proven on one overlay; names transferred from Episode I |
+| [Xenosaga Episode III](docs/games/xenosaga-3.md) (2006) | SCE ee-gcc 2.96 | proven on all four units; three builds compared; per-file `-G` and aliasing flags measured |
 | [Final Fantasy X](docs/games/final-fantasy-x.md) (2001) | SCE ee-gcc 2.9-ee-991111 family | lead; Sony's own 2000 toolchain staged and probed |
 | [Metal Gear Solid 3](docs/games/metal-gear-solid-3.md) (2004) | SCE ee-gcc 3.x | lead; zlib-stub boot ELF unwrapped byte-exact |
 | [Silent Hill 2](docs/games/silent-hill-2.md) (2001) | Metrowerks CodeWarrior for PS2 | identified; 54 overlay records read; compiler runs, no judged lane yet |

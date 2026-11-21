@@ -196,16 +196,19 @@ stack size, args, root), `SetupHeap` (0x3d), two init calls, `ei`, load `argc`,
 `main`, `j Exit`. Silent Hill 2's `SLUS_202.28` begins straight at the `.bss`
 clear: Konami linked Sony's `crt0`, under CodeWarrior. The CodeWarrior for
 PS2 R3.0x stationery, read afterwards, links **Sony's `crt0.s` unchanged**, so
-in 2001-2002 a Metrowerks title started exactly like an SCE-gcc one; Yakuza's
-register zeroing is a later runtime's or Sega's own. Hence the rule the
-fingerprint tool applies:
+in 2001-2002 a Metrowerks title started exactly like an SCE-gcc one. Yakuza's
+register zeroing was first taken for a later Metrowerks runtime's or Sega's
+own, and the fingerprint named the vendor from it. That was wrong: Xenosaga
+III (SCE ee-gcc 2.96, no Metrowerks code, `docs/games/xenosaga-3.md`) begins
+with the same sequence, word for word, and both titles carry SDK 3.0.0
+banners. It is Sony's `crt0` of that SDK. Hence the rule the fingerprint tool
+applies:
 
-- a run of `padduw rd,$zero,$zero` at the entry point is the register-zeroing
-  startup seen on Yakuza, the habit of CodeWarrior for PlayStation's
-  `_psstart.c` (`startup: metrowerks-psstart`): a tell about the title's
-  startup file, reported with that caveat, medium confidence on its own;
-- the Sony `crt0` shape at the entry is a startup tell only, and never argues
-  against CodeWarrior (`startup: sce-crt0`);
+- a run of `padduw rd,$zero,$zero` at the entry point is the register-clearing
+  `crt0` of SDK 3.0 (`startup: sce-crt0-regclear`): reported, and no evidence
+  for or against any compiler;
+- the older Sony `crt0` shape (bss clear first) is a startup tell only, and
+  never argues against CodeWarrior (`startup: sce-crt0`);
 - the stronger separator is in the code itself: SCE gcc writes `nop;nop`
   before every `div.s` from 2.9-ee-991111-01 (June 2000) on, CodeWarrior never
   does (Silent Hill 2: 70 of 753 `div.s` padded, the SDK minority).
@@ -281,8 +284,8 @@ from the release notes, which lag them.
   bss size from the right slot per version, `static_init` on versions 1-2,
   words 6-7 raw with the construction note; its self-test carries the R4 demo
   header and Yakuza's values.
-- `fingerprint_elf.py` reports `startup` (`metrowerks-psstart` / `sce-crt0`),
-  names Metrowerks on the startup tell when no vendor string survives, prints
+- `fingerprint_elf.py` reports `startup` (`sce-crt0-regclear` / `sce-crt0`)
+  without drawing a vendor from it, prints
   the lineage row of a `MW MIPS C Compiler (x.y.z)` string, and accepts
   `mwo1`..`mwo3` inputs.
 - `mcp/server.py` serves this file as `kit://docs/codewarrior`, reports the

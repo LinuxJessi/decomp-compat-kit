@@ -12,9 +12,10 @@ tiny loader executable and the whole game as one Metrowerks overlay record.
 
 The loader's entry zeroes every general register with `padduw`, then the hi/lo
 pairs, the shift amount and all 32 FPU registers, before the usual SetupThread
-and SetupHeap sequence. That is the register-zeroing habit of CodeWarrior for
-PlayStation's `_psstart.c`; CodeWarrior for PS2 R3.0x stationery links Sony's
-`crt0.s` instead, so this startup is a later runtime's or Sega's own.
+and SetupHeap sequence. That looked like the register-zeroing habit of
+CodeWarrior for PlayStation's `_psstart.c`, but it is Sony's: Xenosaga III, an
+ee-gcc title on the same SDK 3.0.0, starts with the same words. The entry
+point says which SDK's `crt0` was linked and nothing about the compiler.
 
 ## What built it: Metrowerks CodeWarrior for PlayStation 2 (identified)
 

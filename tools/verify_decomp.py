@@ -1308,6 +1308,24 @@ def parse_annotations(text: str) -> dict:
     return out
 
 
+def annotated_text(src: Path, includes=(), seen=None) -> str:
+    """SRC's text followed by that of every `#include "x.h"` it pulls in (next to it or under
+    an include root), for the annotations only: a TU-local header is where the Xenosaga III
+    ledger keeps the `@addr` of a struct the TU's functions share."""
+    seen = set() if seen is None else seen
+    src = Path(src)
+    if src in seen or not src.is_file():
+        return ""
+    seen.add(src)
+    text = src.read_text(errors="replace")
+    for m in re.finditer(r'^[ \t]*#[ \t]*include[ \t]+"([^"\n]+)"', text, re.M):
+        for d in [src.parent, *includes]:
+            if (Path(d) / m.group(1)).is_file():
+                text += "\n" + annotated_text(Path(d) / m.group(1), includes, seen)
+                break
+    return text
+
+
 def split_cflags(flags) -> tuple:
     """(-G flag, extra cc1 flags) from a flag list: `-G 0` and `-G0` both give `-G0`;
     -O2 is implied by every build, other flags are passed to cc1."""
@@ -1451,6 +1469,7 @@ class OverlaySymbols:
         self.base, self.extra = base, dict(extra or {})
         self.exact, self.stripped, self.foreign = base.exact, base.stripped, base.foreign
         self.gp = base.gp or (gp or 0)
+        self._size_at = None
 
     def value(self, name: str) -> int:
         if name in self.extra:
@@ -1464,7 +1483,23 @@ class OverlaySymbols:
             raise
 
     def size(self, name: str) -> int:
-        return self.base.size(name)
+        n = self.base.size(name)
+        if n or self.base.known(name):
+            return n
+        # A function defined under a decompiler's auto name (FUN_00a8ded8) while the table
+        # spells that address another way (func_00A8DED8): it is the table's function at that
+        # address, so it takes that row's size. Without this it had no size and was dropped
+        # from the verdicts without a word (Xenosaga III's Ghidra-named TUs against a splat table).
+        m = AUTO_NAME.match(name)
+        if not m:
+            return 0
+        if self._size_at is None:
+            self._size_at = {}
+            for va, size in self.base.exact.values():
+                if size:
+                    self._size_at.setdefault(va, size)
+        va = self.extra.get(name, int(m.group(1) or m.group(2), 16))
+        return self._size_at.get(va, 0)
 
     def known(self, name: str) -> bool:
         return name in self.extra or self.base.known(name) or bool(AUTO_NAME.match(name))
@@ -1521,7 +1556,7 @@ def run_target(args, target: Target) -> int:
         if not src.exists():
             skipped.append((t["id"], "missing", [str(src)]))
             continue
-        text = src.read_text(errors="replace")
+        text = annotated_text(src, includes)       # the TU and its own headers: an @addr may sit in either
         sources[t["id"]] = text
         ann = parse_annotations(text)
         g, extra = split_cflags(ann["cflags"] if ann["cflags"] is not None else t["flags"])
@@ -1807,11 +1842,24 @@ def self_test() -> int:
     ov = OverlaySymbols(_B(), {"sBuf": 0x69e36c})
     checks["overlay-symbols"] = (ov.value("sBuf") == 0x69e36c and ov.value("g") == 0x400000
                                  and ov.value("FUN_00186448") == 0x186448 and ov.known("DAT_00645820") and ov.gp == 0x6a2df0)
+    class _T:                                    # a table that spells 0xa8ded8 the splat way
+        exact = {"func_00A8DED8": (0xa8ded8, 68)}
+        stripped, foreign, gp = {}, {}, 0
+        def value(self, n): return self.exact[n][0]
+        def size(self, n): return self.exact.get(n, (0, 0))[1]
+        def known(self, n): return n in self.exact
+    ov = OverlaySymbols(_T())
+    checks["auto-name-size"] = (ov.size("FUN_00a8ded8") == 68 and ov.size("func_00A8DED8") == 68
+                                and ov.size("FUN_00a8dedc") == 0 and ov.size("nope") == 0)
     import tempfile as _tf
     with _tf.TemporaryDirectory() as tmp:
         root = Path(tmp)
         (root / "src" / "main").mkdir(parents=True)
         (root / "src" / "main" / "a.c").write_text("int a;")
+        (root / "src" / "main" / "h.h").write_text("extern int s;   /* @addr s 0xaa9320 */\n")
+        (root / "src" / "main" / "b.c").write_text('#include "h.h"\n#include <stdio.h>\n/* @addr t 0x10 */\n')
+        checks["header-annotations"] = (parse_annotations(annotated_text(root / "src" / "main" / "b.c"))["addr"]
+                                        == {"t": 0x10, "s": 0xaa9320})
         (root / "t.json").write_text(json.dumps(dict(
             schema=TARGET_SCHEMA, name="t", game_dir="ELF", symbols="symbols/x.csv", units=dict(main=dict(binary="G.ELF")),
             include=["src/main"], toolchains="tc", default_contract="c",
