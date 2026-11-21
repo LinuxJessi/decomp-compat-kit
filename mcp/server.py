@@ -557,7 +557,11 @@ def triage_unit(binary: str | None = None, classes: str | None = None, limit: in
 
 @server.tool(annotations=READ_ONLY, description="Static maintainer checks on one TU source of the configured upstream "
              "(path relative to it, e.g. src/ov01/calc.c): prototypes placed after their definition, #defines and "
-             "prototypes nothing else in the TU names, goto statements, raw `& 0x..` masks, lines over `max_line`. With "
+             "prototypes nothing else in the TU names, goto statements, raw `& 0x..` masks, lines over `max_line`, and under "
+             "`review` the maintainer's standing review points (tools/review_checks.py: func_ placeholders, ov01 names "
+             "the symbol files already give, prototypes/types a header declares, one tag with two shapes, view casts, "
+             "int fields holding pointers, double casts, `x -= a < b`, __inline__, __builtin_mem*, pointers before their "
+             "object, libc-named locals, role-less fields/types). With "
              "`base` (a path to the same file from the base tree) only what the current file ADDS is reported. The gate "
              "decides bytes; this lists what a human reviewer would flag.")
 def lint_tu(path: str, base: str | None = None, max_line: int = 120) -> dict[str, Any]:
@@ -596,6 +600,18 @@ def lint_tu(path: str, base: str | None = None, max_line: int = 120) -> dict[str
                 out["late_protos"].append(name)
     for k in ("late_protos", "unused", "gotos", "masks", "long_lines"):
         out[k] = sorted(set(out[k]))
+    try:
+        sys.path.insert(0, str(TOOLS))
+        import review_checks
+        index = review_checks.TreeIndex(UPSTREAM)
+        rel = str(src.relative_to(UPSTREAM)) if src.is_relative_to(UPSTREAM) else str(src)
+        now = review_checks.findings(text, rel, index)
+        before = review_checks.findings(base_text, rel, index) if base_text else {k: set() for k in now}
+        stable = lambda item: re.sub(r"^line \d+: ", "", item)
+        out["review"] = {k: sorted(i for i in v if stable(i) not in {stable(b) for b in before[k]}) for k, v in now.items()}
+        out["review"] = {k: v for k, v in out["review"].items() if v}
+    except Exception as exc:  # the classic checks above stay useful without the tree index
+        out["review_error"] = repr(exc)
     return out
 
 
